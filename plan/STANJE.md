@@ -26,7 +26,7 @@ upiši je ovde).
 | 7 | DC-09 okvir | ✅ gotovo | dc09.go (CRC16, DC09Frame, BuildFrame, ParseResponse) |
 | 8 | Forwarder | ✅ gotovo | forwarder.go (NewForwarder/Start/Enqueue/Stop) |
 | 9 | Integracija prosleđivanja | ✅ gotovo | Processor.Forwarders, --forward* |
-| 10 | Dokumentacija, Docker, završna provera | ⏳ sledeći | |
+| 10 | Dokumentacija, Docker, završna provera | 🔧 u toku | |
 
 Statusi: ⬜ nije počet · ⏳ sledeći · 🔧 u toku (prekinut) · ✅ gotovo · ⛔ blokiran
 
