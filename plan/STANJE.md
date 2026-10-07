@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 3 – Tabela SIA kodova**
+**Korak 4 – Processor i integracija parsera u `handleConnection`**
 
 ## Grana
 
@@ -19,8 +19,8 @@ upiši je ovde).
 | 0 | Priprema (go.mod, plan, `/korak`) | ✅ gotovo | (ovaj commit) |
 | 1 | Model poruke i parser zaglavlja | ✅ gotovo | 1af1d53 |
 | 2 | Parser SIA data bloka (događaji) | ✅ gotovo | parseEvents, parseBlockEvents |
-| 3 | Tabela SIA kodova | ⏳ sledeći | |
-| 4 | Processor i integracija parsera | ⬜ | |
+| 3 | Tabela SIA kodova | ✅ gotovo | siacodes.go, DescribeSIA |
+| 4 | Processor i integracija parsera | ⏳ sledeći | |
 | 5 | SQLite store | ⬜ | |
 | 6 | Integracija baze | ⬜ | |
 | 7 | DC-09 okvir | ⬜ | |
@@ -67,6 +67,27 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 3 – Tabela SIA kodova (2026-10-07)
+- Urađeno: novi `siacodes.go` – `siaCodes map[string]string` (304 SIA DC-03
+  koda, AA…ZU, engleski opisi) i `DescribeSIA(code) string` (`""` za nepoznat,
+  osetljivo na velika/mala slova). `parseBlockEvents` u `sia.go` sada pravi
+  događaj sa `Description: DescribeSIA(tok[:2])`.
+- Fajlovi: `siacodes.go` (nov), `siacodes_test.go` (nov), `sia.go`, `sia_test.go`.
+- Odluke/odstupanja: nema odstupanja od ugovora. Tabela je pisana po
+  standardnoj SIA DC-03 listi; uključeni su i noviji kodovi (`BG/FG/HG/MG/PG/QG/UG`
+  „Unverified Event“, `CP/CQ/OQ`, `NF/NL`). `NM` namerno nije u tabeli (kod ATS-a
+  je to samo završetak teksta `*'...'NM`, a parser ga ionako ne vidi kao događaj).
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (novi: `TestDescribeSIA`,
+  `TestSIACodesTable` – svaki ključ `[A-Z]{2}`, opis neprazan, ≥200 kodova,
+  `TestParseMessageDescription`; `TestParseMessageEvents` sada očekivanim
+  događajima postavlja `Description = DescribeSIA(Code)` pre poređenja).
+- Za sledeći korak:
+  - `m.Events[i].Description` je već popunjen posle `ParseMessage` – Processor
+    ne treba ništa da dopunjuje; za log može koristiti `Code`+`Description`.
+  - Za kompatibilnost sa pusher-om (`SIA` struct): `ParseSIA` u `parser.go` i
+    dalje postoji i nije diran; `SIA` se može sastaviti iz `Message`
+    (`Sequence`, `Receiver`, `Line`, `Account`, `Events[0].Code`, `Events[0].Zone`).
 
 ### Korak 2 – Parser SIA data bloka (događaji) (2026-10-07)
 - Urađeno: `ParseMessage` na kraju (za `KindSIA` i Protocol `SIA-DCS`/`*SIA-DCS`)

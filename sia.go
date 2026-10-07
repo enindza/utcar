@@ -173,7 +173,8 @@ func parseBlockEvents(data string) []Event {
 				continue
 			}
 			if eventRegex.MatchString(tok) {
-				ev := Event{Code: tok[:2], Area: area, User: user, Time: tm}
+				ev := Event{Code: tok[:2], Description: DescribeSIA(tok[:2]),
+					Area: area, User: user, Time: tm}
 				zone := tok[2:]
 				if star := strings.Index(zone, "*'"); star >= 0 {
 					text := zone[star+2:]

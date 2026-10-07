@@ -214,6 +214,10 @@ func TestParseMessageEvents(t *testing.T) {
 			if m.Kind != KindSIA {
 				t.Fatalf("Kind = %q, want sia (%q)", m.Kind, m.ParseError)
 			}
+			// Description comes from the code table (tested in siacodes_test.go).
+			for i := range tt.want {
+				tt.want[i].Description = DescribeSIA(tt.want[i].Code)
+			}
 			if !reflect.DeepEqual(m.Events, tt.want) {
 				t.Errorf("Events = %+v\nwant     %+v", m.Events, tt.want)
 			}
