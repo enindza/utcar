@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 7 – DC-09 okvir**
+**Korak 8 – Forwarder**
 
 ## Grana
 
@@ -23,8 +23,8 @@ upiši je ovde).
 | 4 | Processor i integracija parsera | ✅ gotovo | processor.go, handleConnection(c, p) |
 | 5 | SQLite store | ✅ gotovo | store.go (OpenStore/Save/Close) |
 | 6 | Integracija baze | ✅ gotovo | Processor.Store, --db, --db-heartbeats |
-| 7 | DC-09 okvir | ⏳ sledeći | |
-| 8 | Forwarder | ⬜ | |
+| 7 | DC-09 okvir | ✅ gotovo | dc09.go (CRC16, DC09Frame, BuildFrame, ParseResponse) |
+| 8 | Forwarder | ⏳ sledeći | |
 | 9 | Integracija prosleđivanja | ⬜ | |
 | 10 | Dokumentacija, Docker, završna provera | ⬜ | |
 
@@ -44,6 +44,9 @@ brojem koraka. Sledeći koraci ovo imaju prednost nad `PLAN.md`.)
   `toolchain` je uklonjena (`go mod edit -toolchain=none`).
 - Korak 6: `Processor` sada ima `Store *Store`, `Push chan SIA`,
   `StoreHeartbeats bool` (još bez `Forwarders`/`ForwardHeartbeats` – korak 9).
+- Korak 7: `BuildFrame(m, "dc09")` vraća grešku i za SIA/heartbeat poruku bez
+  `Account` (centar ne bi mogao da identifikuje objekat). Dodate konstante
+  `FormatDC09`/`FormatRaw` i `ResponseACK`/`ResponseNAK`/`ResponseDUH`.
 
 ## Otvorena pitanja za korisnika
 
@@ -86,6 +89,55 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 7 – DC-09 okvir (2026-10-07)
+- Urađeno: novi `dc09.go` – `CRC16` (CRC-16/ARC), `DC09Frame(body)`
+  (`"\n" + %04X crc + %04X len + body + "\r"`), `BuildFrame(m, format)`,
+  `ParseResponse(resp)`. `dc09`: SIA → `"PROTO"seq` + `R`rcvr (ako postoji) +
+  `L`line (ili `L0`) + `#`acct + `Blocks` + `Timestamp` (deo posle blokova,
+  npr. `7C9677F21948CC12|#001465`, se izostavlja); heartbeat → `"NULL"` +
+  brojač 0001–9999 (globalni `nullSequence atomic.Uint32`, posle 9999 ide
+  0001) + `R`rcvr `L`line `#`acct `[]`; unknown/nil/bez naloga/nepoznat format →
+  greška. `raw`: `"\n" + m.Raw + "\r"` za sve vrste poruka (i unknown),
+  greška samo za nil ili prazan `Raw`.
+- `ParseResponse`: trim `\n\r\x00 `; goli `ACK`/`NAK`/`DUH` prihvata; inače
+  traži `"ID"`; ako ispred navodnika ima nešto, mora biti tačno 8 hex znakova
+  i proveravaju se CRC i dužina (ostatak od navodnika do kraja). ID mora biti
+  ACK/NAK/DUH, inače greška. Sekvenca/nalog u odgovoru se ne proveravaju.
+- **Nalaz o prefiksu dekriptovane poruke**: prva 4 znaka (`0101`) **nisu**
+  DC-09 CRC. Za README primer `01010053"SIA-DCS"0007R0073L0011[#001365|NUA021*'detector hall'NM]7C9677F21948CC12|#001365`
+  CRC tela od navodnika do kraja je `0FAC` (bez repa `7C96…`: `1980`), a
+  dužina je 81 (`0x51`) prema `0053` (83) u poruci; `0101` je isti u svim
+  primerima (izgleda kao konstanta ATS-a). Dakle `raw` **nije** ispravan DC-09
+  okvir – za standardne DC-09 centre koristiti `dc09` (default); `raw` samo
+  za centre koji primaju isti format kao ATS (OH+XSIA). (Napomena: tačni
+  podaci stvarne poruke bi trebalo da se potvrde na pravom panelu – 2 bajta
+  razlike u dužini mogu biti CR/LF ili izmenjen primer u README-u.)
+- Fajlovi: `dc09.go` (nov), `dc09_test.go` (nov).
+- Odluke/odstupanja: poruka bez naloga → greška (vidi „Promene ugovora“).
+  Protokol se prepisuje doslovno (i `*SIA-DCS`/`ADM-CID`). Heartbeat
+  `Receiver`/`Line` su decimalni iz `SR0001L0001` – prepisuju se kao jesu.
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (i `-race`). Novi
+  testovi: `TestCRC16` (`123456789` → BB3D), `TestDC09Frame`,
+  `TestBuildFrameSIA` (5 slučajeva: README, 2 bloka, timestamp, bez L, ADM-CID),
+  `TestBuildFrameHeartbeat` (uzastopni brojevi, prelaz 9999→0001),
+  `TestBuildFrameErrors`, `TestBuildFrameRaw`, `TestParseResponse`
+  (ACK/NAK/DUH sa i bez okvira, smeće, loš CRC/dužina/hex).
+- Za sledeći korak:
+  - Okvir praviti **jednom po poruci** (pre ponovnih pokušaja) – ponovljeni
+    pokušaj mora imati isti broj sekvence (bitno za NULL brojač); greška
+    `BuildFrame` → log upozorenje, poruka se ne stavlja u red (ili se
+    odbacuje u goroutine-i).
+  - Format iz spec-a: `?format=raw` → `FormatRaw`, inače `FormatDC09`;
+    nepoznat format → greška u `NewForwarder` (može se proveriti pozivom
+    `BuildFrame(&Message{Kind: KindHeartbeat, Account: "1"}, format)` ili
+    prostim poređenjem sa konstantama).
+  - Odgovor centra se čita do `\r` (okvir počinje sa `\n`); `ParseResponse`
+    sam skida `\n\r\x00`. U testovima lažni centar može odgovoriti sa
+    `DC09Frame(`"ACK"0007R0075L0001#001465[]`)`, `DC09Frame(`"NAK"...`)`,
+    `DC09Frame(`"DUH"...`)`.
+  - `nullSequence` je globalan (paket) – u testovima ne pretpostavljati
+    konkretan broj NULL sekvence.
 
 ### Korak 6 – Integracija baze (2026-10-07)
 - Urađeno: `Processor` dobio `Store *Store` i `StoreHeartbeats bool`;
