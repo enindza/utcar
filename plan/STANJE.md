@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 1 – Model poruke i parser zaglavlja**
+**Korak 2 – Parser SIA data bloka (događaji)**
 
 ## Grana
 
@@ -17,8 +17,8 @@ upiši je ovde).
 | # | Korak | Status | Commit |
 |---|---|---|---|
 | 0 | Priprema (go.mod, plan, `/korak`) | ✅ gotovo | (ovaj commit) |
-| 1 | Model poruke i parser zaglavlja | ⏳ sledeći | |
-| 2 | Parser SIA data bloka (događaji) | ⬜ | |
+| 1 | Model poruke i parser zaglavlja | ✅ gotovo | sia.go, ParseMessage, IsHeartbeat |
+| 2 | Parser SIA data bloka (događaji) | ⏳ sledeći | |
 | 3 | Tabela SIA kodova | ⬜ | |
 | 4 | Processor i integracija parsera | ⬜ | |
 | 5 | SQLite store | ⬜ | |
@@ -52,6 +52,8 @@ postavi pitanje i stane.)
 - `utcar.go`: greška debug servera se proverava pre nego što goroutine stigne
   da je postavi.
 - `pusher.go`: `InsecureSkipVerify: true`.
+- `gofmt -l .` prijavljuje `pusher.go`, `util.go`, `util_test.go` – bili su
+  neformatirani i pre koraka 1 (ne dirati `pusher.go`; ostale po želji u koraku 10).
 
 ## Dnevnik (handoff beleške)
 
@@ -65,6 +67,38 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 1 – Model poruke i parser zaglavlja (2026-10-07)
+- Urađeno: novi `sia.go` sa tipovima `MessageKind`, `Event`, `Message` (po
+  ugovoru) i `ParseMessage`; `IsHeartbeat` premešten iz `parser.go` u `sia.go`
+  sa ispravljenim regex-om (`^SR(\d{4})L(\d{4})[\s\x00]+(\w+)[\s\x00]+\[\w*\]$`,
+  ulaz se prvo trim-uje od `\n\r\x00`). `ParseSIA` i `handleConnection` nisu dirani.
+- Fajlovi: `sia.go` (nov), `sia_test.go` (nov), `parser.go` (uklonjen `IsHeartbeat`).
+- Odluke/odstupanja (u okviru ugovora):
+  - Zaglavlje: regex `headerRegex` traži bilo gde
+    `"PROTO"\d{4}(R hex{1,6})?(L hex{1,6})?(#hex{3,16})?\[` – sekvenca je
+    obavezna, mora odmah da sledi `[`. Protocol može biti i `*SIA-DCS`, `NULL`,
+    `ADM-CID` (bilo šta bez navodnika/razmaka).
+  - Account: prvo iz zaglavlja (`#acct`), inače iz prvog bloka (`[#acct|` ili `[#acct]`).
+  - Posle blokova sme da stoji bilo šta (kod ATS-a stoji `7C9677F21948CC12|#001465`
+    – ignoriše se, ostaje samo u `Raw`). `Timestamp` se traži regex-om
+    `_\d{2}:\d{2}:\d{2},\d{2}-\d{2}-\d{4}` u delu posle blokova.
+  - Unknown: `ParseError` je `"no heartbeat or SIA header found"` ili
+    `"unterminated data block"`; kod drugog su Protocol/Sequence/... ipak
+    popunjeni (korisno za bazu/log), `Blocks` je prazan.
+  - Heartbeat: `Account` = treće polje bez završnih `X`; `Protocol`/`Sequence` prazni.
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (novi: `TestIsHeartbeatNUL`,
+  `TestParseMessageHeartbeat`, `TestParseMessageSIA` – 8 slučajeva,
+  `TestParseMessageUnknown` – 8 slučajeva; stari testovi i dalje prolaze).
+- Za sledeći korak:
+  - Događaje parsirati iz `m.Blocks` (sadrži zagrade, više blokova
+    jedan za drugim, npr. `[#001465|NUA021*'hall [1]'NM][#001465|NUR021]`).
+    Pomoćna funkcija `scanBlocks(s, start)` već zna da preskoči `]` unutar
+    `'...'` – može se iskoristiti/proširiti za razbijanje na pojedinačne blokove.
+  - Popunjavati `Events` samo kad je `Kind == KindSIA` i Protocol `SIA-DCS`
+    ili `*SIA-DCS`; poziv dodati na kraj `ParseMessage` (posle `m.Kind = KindSIA`).
+  - Prefiks `#acct|` u bloku treba preskočiti pre događaja; blok `[]` (NULL) nema događaja.
+  - Primeri u `sia_test.go` (`TestParseMessageSIA`) mogu se proširiti očekivanim događajima.
 
 ### Korak 0 – Priprema (2026-10-07)
 - Urađeno: dodat `go.mod` (modul `github.com/enindza/utcar`, `go 1.24`,
