@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 8 – Forwarder**
+**Korak 9 – Integracija prosleđivanja**
 
 ## Grana
 
@@ -24,8 +24,8 @@ upiši je ovde).
 | 5 | SQLite store | ✅ gotovo | store.go (OpenStore/Save/Close) |
 | 6 | Integracija baze | ✅ gotovo | Processor.Store, --db, --db-heartbeats |
 | 7 | DC-09 okvir | ✅ gotovo | dc09.go (CRC16, DC09Frame, BuildFrame, ParseResponse) |
-| 8 | Forwarder | ⏳ sledeći | |
-| 9 | Integracija prosleđivanja | ⬜ | |
+| 8 | Forwarder | ✅ gotovo | forwarder.go (NewForwarder/Start/Enqueue/Stop) |
+| 9 | Integracija prosleđivanja | ⏳ sledeći | |
 | 10 | Dokumentacija, Docker, završna provera | ⬜ | |
 
 Statusi: ⬜ nije počet · ⏳ sledeći · 🔧 u toku (prekinut) · ✅ gotovo · ⛔ blokiran
@@ -47,6 +47,12 @@ brojem koraka. Sledeći koraci ovo imaju prednost nad `PLAN.md`.)
 - Korak 7: `BuildFrame(m, "dc09")` vraća grešku i za SIA/heartbeat poruku bez
   `Account` (centar ne bi mogao da identifikuje objekat). Dodate konstante
   `FormatDC09`/`FormatRaw` i `ResponseACK`/`ResponseNAK`/`ResponseDUH`.
+- Korak 8: `Enqueue` vraća `false` kad poruka **nije stavljena u red** iz bilo
+  kog razloga: pun red, forwarder zaustavljen, ili `BuildFrame` greška (npr.
+  `unknown` u `dc09`, nil poruka). U svim slučajevima `Enqueue` sam loguje
+  upozorenje (osim posle `Stop`) – pozivalac ne treba da loguje. Dodata metoda
+  `Format() string` i konstante `DefaultForward{Queue,Timeout,MinBackoff,MaxBackoff}`;
+  nulte vrednosti u `ForwarderOptions` → default (1000, 10s, 1s, 60s).
 
 ## Otvorena pitanja za korisnika
 
@@ -89,6 +95,55 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 8 – Forwarder (2026-10-07)
+- Urađeno: novi `forwarder.go`. `NewForwarder(spec, opts)` parsira spec
+  (`parseForwardSpec`: `host:port`, `tcp://host:port[/]`,
+  `?format=dc09|raw`; druge šeme/opcije/putanja/user, port 0 ili nenumerički,
+  prazan host → greška) i pravi red `chan forwardItem` veličine `QueueSize`.
+  `Enqueue` **odmah** pravi okvir (`BuildFrame`) – svi pokušaji šalju isti
+  okvir (isti NULL broj). `Start` (sync.Once) pokreće jednu goroutine (`run`
+  → `deliver` → `send`). `send`: `Dialer.DialContext` (Timeout), jedan
+  `SetDeadline(now+Timeout)` za upis i čitanje, čitanje do `\r` (ili EOF sa
+  podacima), `ParseResponse`; `context.AfterFunc` zatvara konekciju na `Stop`.
+  Konekcija po poruci (zatvara se posle odgovora).
+- Pravila: ACK → gotovo (log „delivered … (attempt N)“ samo za ne-heartbeat);
+  DUH → upozorenje, odustaje; NAK/greška/timeout → za heartbeat samo log, bez
+  ponavljanja; ostalo ponavlja sa backoff-om `MinBackoff`, ×2, do `MaxBackoff`
+  (backoff se resetuje za svaku poruku). `retry = m.Kind != KindHeartbeat`
+  (u `raw` formatu se i `unknown` šalje i ponavlja). `Stop`: cancel ctx
+  (prekida dial/čitanje/backoff), čeka goroutine, loguje broj odbačenih
+  poruka iz reda; višestruki `Stop` i `Stop` bez `Start` su bezbedni.
+- Fajlovi: `forwarder.go` (nov), `forwarder_test.go` (nov).
+- Odluke/odstupanja: vidi „Promene ugovora“ (Korak 8). `Name()` = `host:port`
+  (bez formata).
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (i `-race -count=5`).
+  Novi testovi (lažni centar `newFakeCenter(t, addr, respond)` beleži okvire,
+  odgovara `respond(n, frame)`; nil → ne odgovara i drži konekciju):
+  `TestForwarderACK`, `…NAKRetry` (isti okvir 2×), `…TimeoutRetry`,
+  `…CenterDown` (centar upaljen kasnije na istoj adresi), `…DUH`,
+  `…HeartbeatNoRetry`, `…HeartbeatCenterDown`, `…Raw` (i unknown u raw),
+  `…Enqueue` (pun red, unknown/nil u dc09, posle Stop), `…Stop` (tokom
+  backoff-a i tokom čekanja odgovora), `…StopNotStarted`, `TestNewForwarderSpec`.
+- Za sledeći korak:
+  - U `Processor` dodati `Forwarders []*Forwarder` i `ForwardHeartbeats bool`;
+    u `Process` za svaki forwarder `f.Enqueue(m)` (heartbeat samo ako
+    `ForwardHeartbeats`). Povratnu vrednost ne treba logovati (Enqueue loguje).
+    `unknown` u dc09 formatu: `Enqueue` sam odbija uz upozorenje – ili ga
+    Processor preskoči proverom `f.Format() == FormatDC09` da ne bi bilo
+    duplog upozorenja (Processor već loguje „WARNING: unrecognized message“).
+  - Flagovi: `--forward` (StringSlice; env `UTCAR_FORWARD` lista sa zarezom –
+    proveriti da viper `GetStringSlice` deli env po zarezu), `--forward-timeout`
+    (10s), `--forward-queue` (1000), `--forward-heartbeats` (true).
+    `ForwarderOptions{QueueSize, Timeout}` – backoff ostaviti 0 (default 1s/60s).
+    Greška `NewForwarder` = fatalna. Posle `Start()` logovati
+    „Forwarding to <Name()> (format <Format()>)“.
+  - `Stop` se ne poziva na CTRL-C (`os.Exit` u `receiveSignal`) – vidi
+    „Poznati problemi“.
+  - Test pomoćnici u `forwarder_test.go`: `newFakeCenter`, `c.next()`,
+    `c.none()`, `centerResponse(id)`, `always(id)`, `testForwardOptions`
+    (mali backoff), `startForwarder(t, spec, opts)` (Stop u Cleanup),
+    `frameBody`. Poruke: `testForwardSIA`, `testForwardSIA2`, `testForwardHeartbeat`.
 
 ### Korak 7 – DC-09 okvir (2026-10-07)
 - Urađeno: novi `dc09.go` – `CRC16` (CRC-16/ARC), `DC09Frame(body)`
