@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -134,5 +135,81 @@ func TestProcessStoreError(t *testing.T) {
 	p.Process(ParseMessage([]byte("0101005B\"SIA-DCS\"0008R0075L0001[#001465|NUA021]")))
 	if len(p.Push) != 1 {
 		t.Errorf("pushed %d SIA messages after a database error, want 1", len(p.Push))
+	}
+}
+
+// queuedFrames returns the frames queued by a (not started) forwarder.
+func queuedFrames(f *Forwarder) []string {
+	var frames []string
+	for len(f.queue) > 0 {
+		frames = append(frames, string((<-f.queue).frame))
+	}
+	return frames
+}
+
+func TestProcessForward(t *testing.T) {
+	heartbeat := "SR0001L0001    001465XX    [ID5B9490D8]"
+	sia := "0101005B\"SIA-DCS\"0008R0075L0001[#001465|NUA021*'hall'NM][#001465|NUR022]"
+	siaBody := `"SIA-DCS"0008R0075L0001#001465[#001465|NUA021*'hall'NM][#001465|NUR022]`
+	for _, forwardHeartbeats := range []bool{false, true} {
+		dc09, err := NewForwarder("127.0.0.1:1", ForwarderOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := NewForwarder("tcp://127.0.0.1:2?format=raw", ForwarderOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(dc09.Stop)
+		t.Cleanup(raw.Stop)
+		p := &Processor{Forwarders: []*Forwarder{dc09, raw}, ForwardHeartbeats: forwardHeartbeats}
+		for _, r := range []string{heartbeat, sia, "garbage"} {
+			p.Process(ParseMessage([]byte(r)))
+		}
+
+		// dc09: the unknown message is not forwarded
+		frames := queuedFrames(dc09)
+		want := 1
+		if forwardHeartbeats {
+			want = 2
+			if body := checkFrame(t, []byte(frames[0])); !strings.HasPrefix(body, `"NULL"`) || !strings.HasSuffix(body, "R0001L0001#001465[]") {
+				t.Errorf("ForwardHeartbeats=%t: dc09 frame %q, want NULL message", forwardHeartbeats, body)
+			}
+		}
+		if len(frames) != want {
+			t.Fatalf("ForwardHeartbeats=%t: dc09 forwarder got %d frames %q, want %d", forwardHeartbeats, len(frames), frames, want)
+		}
+		if body := checkFrame(t, []byte(frames[want-1])); body != siaBody {
+			t.Errorf("ForwardHeartbeats=%t: dc09 frame %q, want %q", forwardHeartbeats, body, siaBody)
+		}
+
+		// raw: everything is forwarded as received
+		wantRaw := []string{"\n" + sia + "\r", "\ngarbage\r"}
+		if forwardHeartbeats {
+			wantRaw = append([]string{"\n" + heartbeat + "\r"}, wantRaw...)
+		}
+		if got := queuedFrames(raw); !reflect.DeepEqual(got, wantRaw) {
+			t.Errorf("ForwardHeartbeats=%t: raw frames %q, want %q", forwardHeartbeats, got, wantRaw)
+		}
+	}
+}
+
+// Forwarding must not stop the processing (pushing) of a message, even if a
+// forwarder can't queue it.
+func TestProcessForwardQueueFull(t *testing.T) {
+	f, err := NewForwarder("127.0.0.1:1", ForwarderOptions{QueueSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.Stop)
+	p := &Processor{Forwarders: []*Forwarder{f}, Push: make(chan SIA, 10)}
+	for range 3 {
+		p.Process(ParseMessage([]byte("0101005B\"SIA-DCS\"0008R0075L0001[#001465|NUA021]")))
+	}
+	if len(f.queue) != 1 {
+		t.Errorf("%d messages queued, want 1", len(f.queue))
+	}
+	if len(p.Push) != 3 {
+		t.Errorf("pushed %d SIA messages, want 3", len(p.Push))
 	}
 }

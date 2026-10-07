@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 9 – Integracija prosleđivanja**
+**Korak 10 – Dokumentacija, Docker, završna provera**
 
 ## Grana
 
@@ -25,8 +25,8 @@ upiši je ovde).
 | 6 | Integracija baze | ✅ gotovo | Processor.Store, --db, --db-heartbeats |
 | 7 | DC-09 okvir | ✅ gotovo | dc09.go (CRC16, DC09Frame, BuildFrame, ParseResponse) |
 | 8 | Forwarder | ✅ gotovo | forwarder.go (NewForwarder/Start/Enqueue/Stop) |
-| 9 | Integracija prosleđivanja | ⏳ sledeći | |
-| 10 | Dokumentacija, Docker, završna provera | ⬜ | |
+| 9 | Integracija prosleđivanja | ✅ gotovo | Processor.Forwarders, --forward* |
+| 10 | Dokumentacija, Docker, završna provera | ⏳ sledeći | |
 
 Statusi: ⬜ nije počet · ⏳ sledeći · 🔧 u toku (prekinut) · ✅ gotovo · ⛔ blokiran
 
@@ -53,6 +53,11 @@ brojem koraka. Sledeći koraci ovo imaju prednost nad `PLAN.md`.)
   upozorenje (osim posle `Stop`) – pozivalac ne treba da loguje. Dodata metoda
   `Format() string` i konstante `DefaultForward{Queue,Timeout,MinBackoff,MaxBackoff}`;
   nulte vrednosti u `ForwarderOptions` → default (1000, 10s, 1s, 60s).
+- Korak 9: `Processor` je sada u potpunosti po ugovoru (`Store`, `Forwarders`,
+  `Push`, `StoreHeartbeats`, `ForwardHeartbeats`). `unknown` poruku Processor
+  ne prosleđuje forwarderima u `dc09` formatu (samo u `raw`). Nove pomoćne
+  funkcije u `utcar.go`: `forwardSpecs(values)` (deli po zarezu – viper
+  **ne** deli `UTCAR_FORWARD`, provereno) i `newForwarders(specs, opts)`.
 
 ## Otvorena pitanja za korisnika
 
@@ -78,8 +83,11 @@ postavi pitanje i stane.)
 - CTRL-C (`receiveSignal`) radi `os.Exit(0)`, pa se `defer store.Close()` u
   `run()` ne izvršava. Podaci su bezbedni (svaki `Save` je commit-ovana
   transakcija, WAL se oporavlja pri sledećem otvaranju), ostaju `-wal`/`-shm`
-  fajlovi. Isto važi za buduće forwardere (`Stop`) – rešiti u koraku 9/10 ako
-  treba (npr. signal handler koji zatvara resurse).
+  fajlovi. Isto važi za forwardere (`defer f.Stop()` u `run()` se ne izvršava;
+  poruke u redu se gube pri gašenju – i inače se gube jer red nije trajan).
+  Rešiti u koraku 10 ako treba (npr. signal handler koji zatvara resurse).
+- Red forwardera je samo u memoriji: restart utcar-a gubi neposlate poruke
+  (u bazi ostaju). Van plana – eventualno proširenje.
 - `run()` otvara bazu posle `net.Listen` – greška baze je fatalna, ali port je
   kratko bio otvoren (bez posledica).
 
@@ -95,6 +103,49 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 9 – Integracija prosleđivanja (2026-10-07)
+- Urađeno: `Processor` dobio `Forwarders []*Forwarder` i `ForwardHeartbeats
+  bool`; `Process` posle `p.store(m)` zove `p.forward(m)` (nova metoda:
+  heartbeat samo ako `ForwardHeartbeats`; `unknown` se preskače za forwardere
+  sa `Format() == FormatDC09`, da ne bi bilo duplog upozorenja; povratna
+  vrednost `Enqueue` se ignoriše). Flagovi `--forward` (StringSlice),
+  `--forward-timeout` (`DefaultForwardTimeout`), `--forward-queue`
+  (`DefaultForwardQueue`), `--forward-heartbeats` (`true`) + viper bind.
+  `run()`: `newForwarders(forwardSpecs(viper.GetStringSlice("forward")), opts)`
+  (greška = `log.Fatalf`), za svaki `Start()`, `defer Stop()`, log
+  „Forwarding to <Name> (format <Format>, heartbeats: <bool>)“. Backoff ostaje
+  default (1s/60s).
+- Fajlovi: `processor.go`, `utcar.go`, `processor_test.go`, `utcar_test.go`.
+- Odluke/odstupanja: vidi „Promene ugovora“ (Korak 9). Viper za env vraća
+  `["a:1,b:2"]` (ne deli po zarezu), za flag deli (pflag CSV) – zato
+  `forwardSpecs` deli svaku vrednost po zarezu, trim-uje i preskače prazne.
+  `newForwarders` na grešci zaustavlja već napravljene (nisu startovani).
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (i `-race -count=3`).
+  Novi testovi: `TestProcessForward` (dc09 + raw forwarder bez `Start`, red
+  se čita preko `queuedFrames(f)`; sa/bez `ForwardHeartbeats`; unknown samo u
+  raw), `TestProcessForwardQueueFull` (pun red ne blokira push),
+  `TestHandleConnectionForward` (end-to-end: SIA + heartbeat + smeće preko
+  `handleConnection` → 2 lažna centra; centar b ugašen, a dobija SIA i NULL
+  odmah, pa b upaljen dobija isto; smeće ne stiže), `TestForwardSpecs`,
+  `TestNewForwarders`. Ručno: binar sa `UTCAR_FORWARD="127.0.0.1:9001,
+  tcp://127.0.0.1:9002?format=raw"` loguje 2 forwardera; `--forward udp://x:1`
+  → „Failed to setup forwarding“, exit 1.
+- Za sledeći korak:
+  - README: opisati flagove `--db`, `--db-heartbeats`, `--forward`
+    (`host:port`, `tcp://host:port[?format=dc09|raw]`, više puta ili zarezom;
+    env `UTCAR_FORWARD` zarezom), `--forward-timeout`, `--forward-queue`,
+    `--forward-heartbeats` (env: `UTCAR_` + veliko, `-` → `_`). Napomena da
+    `raw` nije ispravan DC-09 okvir (vidi Korak 7 – nalaz o prefiksu `0101`),
+    da se `unknown` šalje samo u `raw`, heartbeat kao `"NULL"` (jedan pokušaj),
+    događaji se ponavljaju do ACK (backoff 1s→60s), DUH = odustaje.
+  - Docker: `CGO_ENABLED=0` radi (modernc sqlite je pure Go); za bazu treba
+    volume (npr. `--db /data/utcar.db`). Proveriti postojeći `Dockerfile`.
+  - „Poznati problemi“: `gofmt` za `util.go`/`util_test.go` (po želji),
+    CTRL-C ne zatvara bazu/forwardere (`os.Exit` u `receiveSignal`), greška
+    debug servera. Odlučiti šta se rešava u koraku 10.
+  - Sve komande u `run()` čitaju viper posle `initConfig` – `--help` prikazuje
+    sve nove flagove.
 
 ### Korak 8 – Forwarder (2026-10-07)
 - Urađeno: novi `forwarder.go`. `NewForwarder(spec, opts)` parsira spec

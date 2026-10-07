@@ -6,12 +6,14 @@ import (
 )
 
 // Processor handles messages after they have been received, decrypted,
-// acknowledged and parsed: storing, logging, counting and pushing to openHAB.
-// Forwarding (step 9) will be added here.
+// acknowledged and parsed: storing, forwarding to monitoring centers,
+// logging, counting and pushing to openHAB.
 type Processor struct {
-	Store           *Store   // nil = no database
-	Push            chan SIA // nil = no openHAB pusher
-	StoreHeartbeats bool     // store heartbeats too (they arrive every minute)
+	Store             *Store       // nil = no database
+	Forwarders        []*Forwarder // empty = no forwarding
+	Push              chan SIA     // nil = no openHAB pusher
+	StoreHeartbeats   bool         // store heartbeats too (they arrive every minute)
+	ForwardHeartbeats bool         // forward heartbeats as "NULL" link tests
 }
 
 // Process handles a parsed message. p may be nil (only logging and
@@ -21,6 +23,7 @@ func (p *Processor) Process(m *Message) {
 		return
 	}
 	p.store(m)
+	p.forward(m)
 
 	switch m.Kind {
 	case KindHeartbeat:
@@ -58,6 +61,25 @@ func (p *Processor) store(m *Message) {
 	}
 	if _, err := p.Store.Save(m); err != nil {
 		log.Printf("Database error: failed to store %s message from %s (%v)", m.Kind, m.Remote, err)
+	}
+}
+
+// forward queues m for every monitoring center. Queuing never blocks; the
+// forwarders log the messages they can't queue.
+func (p *Processor) forward(m *Message) {
+	if p == nil {
+		return
+	}
+	if m.Kind == KindHeartbeat && !p.ForwardHeartbeats {
+		return
+	}
+	for _, f := range p.Forwarders {
+		// A center can't accept an unknown message in DC-09 format; the
+		// warning about it is logged by Process already.
+		if m.Kind == KindUnknown && f.Format() == FormatDC09 {
+			continue
+		}
+		f.Enqueue(m)
 	}
 }
 

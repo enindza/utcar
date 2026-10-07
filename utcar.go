@@ -59,6 +59,10 @@ func Execute() {
 	rootCmd.PersistentFlags().Int("debug", 0, "Debug server port number (default: no debug server)")
 	rootCmd.PersistentFlags().String("db", "", "SQLite database file (default: no database)")
 	rootCmd.PersistentFlags().Bool("db-heartbeats", false, "Store heartbeat messages in the database")
+	rootCmd.PersistentFlags().StringSlice("forward", nil, "Monitoring center to forward messages to: host:port, tcp://host:port or tcp://host:port?format=raw (repeatable or comma separated)")
+	rootCmd.PersistentFlags().Duration("forward-timeout", DefaultForwardTimeout, "Monitoring center connect and response timeout")
+	rootCmd.PersistentFlags().Int("forward-queue", DefaultForwardQueue, "Messages waiting to be forwarded, per monitoring center")
+	rootCmd.PersistentFlags().Bool("forward-heartbeats", true, "Forward heartbeats as DC-09 NULL (link test) messages")
 	viper.BindPFlag("addr", rootCmd.PersistentFlags().Lookup("addr"))
 	viper.BindPFlag("user", rootCmd.PersistentFlags().Lookup("user"))
 	viper.BindPFlag("pwd", rootCmd.PersistentFlags().Lookup("pwd"))
@@ -66,6 +70,10 @@ func Execute() {
 	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
 	viper.BindPFlag("db", rootCmd.PersistentFlags().Lookup("db"))
 	viper.BindPFlag("db-heartbeats", rootCmd.PersistentFlags().Lookup("db-heartbeats"))
+	viper.BindPFlag("forward", rootCmd.PersistentFlags().Lookup("forward"))
+	viper.BindPFlag("forward-timeout", rootCmd.PersistentFlags().Lookup("forward-timeout"))
+	viper.BindPFlag("forward-queue", rootCmd.PersistentFlags().Lookup("forward-queue"))
+	viper.BindPFlag("forward-heartbeats", rootCmd.PersistentFlags().Lookup("forward-heartbeats"))
 
 	cobra.OnInitialize(initConfig)
 
@@ -80,6 +88,37 @@ func initConfig() {
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
 	viper.SetDefault("port", 12300)
+}
+
+// forwardSpecs returns the monitoring center addresses given by the
+// --forward values. A value may hold several addresses separated by commas:
+// viper doesn't split UTCAR_FORWARD.
+func forwardSpecs(values []string) []string {
+	var specs []string
+	for _, v := range values {
+		for _, spec := range strings.Split(v, ",") {
+			if spec = strings.TrimSpace(spec); spec != "" {
+				specs = append(specs, spec)
+			}
+		}
+	}
+	return specs
+}
+
+// newForwarders creates a (not started) forwarder for every spec.
+func newForwarders(specs []string, opts ForwarderOptions) ([]*Forwarder, error) {
+	var forwarders []*Forwarder
+	for _, spec := range specs {
+		f, err := NewForwarder(spec, opts)
+		if err != nil {
+			for _, f := range forwarders {
+				f.Stop()
+			}
+			return nil, err
+		}
+		forwarders = append(forwarders, f)
+	}
+	return forwarders, nil
 }
 
 // handleConnection handles connections from the alarm system.
@@ -193,7 +232,29 @@ func run() {
 		log.Printf("Storing messages in %s (heartbeats: %t)\n", path, viper.GetBool("db-heartbeats"))
 	}
 
-	p := &Processor{Store: store, Push: pchan, StoreHeartbeats: viper.GetBool("db-heartbeats")}
+	// setup forwarding to monitoring centers (if forward is provided)
+	opts := ForwarderOptions{
+		QueueSize: viper.GetInt("forward-queue"),
+		Timeout:   viper.GetDuration("forward-timeout"),
+	}
+	// own err: the debug server goroutine may still assign the outer one
+	forwarders, ferr := newForwarders(forwardSpecs(viper.GetStringSlice("forward")), opts)
+	if ferr != nil {
+		log.Fatalf("Failed to setup forwarding (%v)", ferr)
+	}
+	for _, f := range forwarders {
+		f.Start()
+		defer f.Stop()
+		log.Printf("Forwarding to %s (format %s, heartbeats: %t)\n", f.Name(), f.Format(), viper.GetBool("forward-heartbeats"))
+	}
+
+	p := &Processor{
+		Store:             store,
+		Forwarders:        forwarders,
+		Push:              pchan,
+		StoreHeartbeats:   viper.GetBool("db-heartbeats"),
+		ForwardHeartbeats: viper.GetBool("forward-heartbeats"),
+	}
 
 	for { // eternally...
 		// Wait for a connection

@@ -203,3 +203,89 @@ func TestHandleConnectionStore(t *testing.T) {
 		t.Errorf("pushed %d SIA messages, want 2", len(p.Push))
 	}
 }
+
+// End-to-end: alarm system -> utcar -> two monitoring centers. Center b is
+// down at first, which must not delay center a.
+func TestHandleConnectionForward(t *testing.T) {
+	a := newFakeCenter(t, "127.0.0.1:0", always(ResponseACK))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addrB := ln.Addr().String()
+	ln.Close()
+
+	fa := startForwarder(t, a.Addr(), testForwardOptions)
+	fb := startForwarder(t, addrB, testForwardOptions)
+	p := &Processor{Forwarders: []*Forwarder{fa, fb}, ForwardHeartbeats: true, Push: make(chan SIA, 10)}
+	for _, m := range []string{
+		"\n0101005B\"SIA-DCS\"0008R0075L0001[#001465|NUA021*'hall'NM][#001465|NUR022]7C9677F21948CC12|#001465",
+		"SR0001L0001    001465XX    [ID5B9490D8]",
+		"this is not a SIA message",
+	} {
+		addr, done := startServer(t, p)
+		sendMessage(t, addr, m)
+		waitDone(t, done)
+	}
+
+	wantSIA := `"SIA-DCS"0008R0075L0001#001465[#001465|NUA021*'hall'NM][#001465|NUR022]`
+	checkCenter := func(name string, c *fakeCenter) {
+		t.Helper()
+		if body := frameBody(t, c.next()); body != wantSIA {
+			t.Errorf("center %s: frame %q, want %q", name, body, wantSIA)
+		}
+		if body := frameBody(t, c.next()); !strings.HasPrefix(body, `"NULL"`) || !strings.HasSuffix(body, "R0001L0001#001465[]") {
+			t.Errorf("center %s: frame %q, want NULL message", name, body)
+		}
+		c.none() // the unknown message is not forwarded in dc09 format
+	}
+	checkCenter("a", a)
+
+	// Center b comes up: the event is retried and delivered, followed by
+	// the heartbeat (queued behind it).
+	b := newFakeCenter(t, addrB, always(ResponseACK))
+	checkCenter("b", b)
+
+	if len(p.Push) != 2 {
+		t.Errorf("pushed %d SIA messages, want 2", len(p.Push))
+	}
+}
+
+func TestForwardSpecs(t *testing.T) {
+	for _, tc := range []struct {
+		values []string
+		want   []string
+	}{
+		{nil, nil},
+		{[]string{""}, nil},
+		{[]string{"a:1"}, []string{"a:1"}},
+		{[]string{"a:1", "tcp://b:2?format=raw"}, []string{"a:1", "tcp://b:2?format=raw"}},
+		{[]string{"a:1, b:2,,", " c:3 "}, []string{"a:1", "b:2", "c:3"}}, // UTCAR_FORWARD
+	} {
+		if got := forwardSpecs(tc.values); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("forwardSpecs(%q) = %q, want %q", tc.values, got, tc.want)
+		}
+	}
+}
+
+func TestNewForwarders(t *testing.T) {
+	fs, err := newForwarders([]string{"a:1", "tcp://b:2?format=raw"}, ForwarderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range fs {
+		got = append(got, f.Name()+" "+f.Format())
+		f.Stop()
+	}
+	if want := []string{"a:1 dc09", "b:2 raw"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("forwarders %q, want %q", got, want)
+	}
+
+	if fs, err := newForwarders([]string{"a:1", "udp://b:2"}, ForwarderOptions{}); err == nil {
+		t.Errorf("newForwarders with an invalid spec = %v, want an error", fs)
+	}
+	if fs, err := newForwarders(nil, ForwarderOptions{}); err != nil || len(fs) != 0 {
+		t.Errorf("newForwarders(nil) = %v, %v, want no forwarders", fs, err)
+	}
+}
