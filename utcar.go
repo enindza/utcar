@@ -80,7 +80,7 @@ func initConfig() {
 // In short, it accepts a connection and sends a new, encrypted key.  Then it
 // receives an encrypted message from the alarm system, after which it completes
 // with an ACK message.
-func handleConnection(c net.Conn, q chan SIA) {
+func handleConnection(c net.Conn, p *Processor) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Message processing panic (%v)\n", r)
@@ -102,6 +102,7 @@ func handleConnection(c net.Conn, q chan SIA) {
 			log.Panic("Read error: ", err)
 		}
 	}
+	received := time.Now()
 	encryptedData := buf[:n]
 
 	data := Decrypt3DESECB(encryptedData, key)
@@ -117,24 +118,12 @@ func handleConnection(c net.Conn, q chan SIA) {
 		log.Panic(err)
 	}
 
-	if IsHeartbeat(data) {
-		log.Println("Heartbeat.")
-		return // don't know what to do with this yet.
+	m := ParseMessage(data)
+	m.Time = received
+	if addr := c.RemoteAddr(); addr != nil {
+		m.Remote = addr.String()
 	}
-	parsed, err := ParseSIA(data)
-	if err != nil {
-		log.Panicf("Not a recognized message: %s", string(data[:]))
-	}
-	sia := SIA{time.Now(), parsed[0], parsed[1], parsed[2], parsed[3], parsed[4], parsed[5]}
-	log.Println(sia)
-
-	requests.Add(1) // accessible through expvar
-
-	if q == nil {
-		return
-	} else {
-		q <- sia
-	}
+	p.Process(m)
 }
 
 func receiveSignal() {
@@ -185,6 +174,8 @@ func run() {
 		}()
 	}
 
+	p := &Processor{Push: pchan}
+
 	for { // eternally...
 		// Wait for a connection
 		conn, err := l.Accept()
@@ -197,7 +188,7 @@ func run() {
 		go func(c net.Conn) {
 			defer c.Close()
 
-			handleConnection(c, pchan)
+			handleConnection(c, p)
 		}(conn)
 	}
 }

@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 4 – Processor i integracija parsera u `handleConnection`**
+**Korak 5 – SQLite store**
 
 ## Grana
 
@@ -20,8 +20,8 @@ upiši je ovde).
 | 1 | Model poruke i parser zaglavlja | ✅ gotovo | 1af1d53 |
 | 2 | Parser SIA data bloka (događaji) | ✅ gotovo | parseEvents, parseBlockEvents |
 | 3 | Tabela SIA kodova | ✅ gotovo | siacodes.go, DescribeSIA |
-| 4 | Processor i integracija parsera | ⏳ sledeći | |
-| 5 | SQLite store | ⬜ | |
+| 4 | Processor i integracija parsera | ✅ gotovo | processor.go, handleConnection(c, p) |
+| 5 | SQLite store | ⏳ sledeći | |
 | 6 | Integracija baze | ⬜ | |
 | 7 | DC-09 okvir | ⬜ | |
 | 8 | Forwarder | ⬜ | |
@@ -35,7 +35,10 @@ Statusi: ⬜ nije počet · ⏳ sledeći · 🔧 u toku (prekinut) · ✅ gotovo
 (Ovde se upisuje svako odstupanje od API-ja/šeme/flagova iz `PLAN.md`, sa
 brojem koraka. Sledeći koraci ovo imaju prednost nad `PLAN.md`.)
 
-- nema
+- Korak 4: `Processor` za sada ima samo polje `Push chan SIA`. Polja `Store` i
+  `StoreHeartbeats` dodaje korak 6, `Forwarders` i `ForwardHeartbeats` korak 9
+  (tipovi `Store`/`Forwarder` još ne postoje). Potpis `Process` je po ugovoru.
+- Korak 4: `ParseSIA` (i `parser.go`, `parser_test.go`) uklonjeni.
 
 ## Otvorena pitanja za korisnika
 
@@ -54,6 +57,10 @@ postavi pitanje i stane.)
 - `pusher.go`: `InsecureSkipVerify: true`.
 - `gofmt -l .` prijavljuje `pusher.go`, `util.go`, `util_test.go` – bili su
   neformatirani i pre koraka 1 (ne dirati `pusher.go`; ostale po želji u koraku 10).
+- Pusher prima **svaki** događaj (ne samo prvi kao ranije); za sve kodove osim
+  UA/UR `HttpPost` vraća grešku → u logu `Push error: Unsupported SIA command`
+  (isto ponašanje kao ranije za npr. RP). `pchan` je nebaferovan, pa
+  `handleConnection` čeka pusher (posle ACK-a, kao i ranije).
 
 ## Dnevnik (handoff beleške)
 
@@ -67,6 +74,43 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 4 – Processor i integracija parsera (2026-10-07)
+- Urađeno: novi `processor.go` – `Processor{Push chan SIA}` i
+  `(p *Processor) Process(m *Message)` (radi i sa `p == nil` i `m == nil`):
+  heartbeat → samo log; unknown → `log` „WARNING: unrecognized message …“
+  (bez panic-a); SIA → `requests.Add(1)`, log zaglavlja i svakog događaja
+  (`formatEvent(e)`), pa za svaki događaj `SIA{m.Time, Sequence, Receiver,
+  Line, Account, e.Code, e.Zone}` u `p.Push` (ako nije nil).
+  `handleConnection(c net.Conn, p *Processor)`: vreme prijema se uzima odmah
+  posle `Read`; posle ACK-a `ParseMessage(data)`, `m.Time`, `m.Remote =
+  c.RemoteAddr().String()`, `p.Process(m)`. `run()` pravi
+  `p := &Processor{Push: pchan}` (pchan je nil ako nema `--addr`).
+- Fajlovi: `processor.go` (nov), `processor_test.go` (nov), `utcar.go`,
+  `utcar_test.go` (prepravljen), obrisani `parser.go` i `parser_test.go`.
+- Odluke/odstupanja: `ParseSIA` uklonjen (nije bilo drugih korisnika);
+  `TestIsHeartbeat` nije premeštan jer `TestIsHeartbeatNUL` u `sia_test.go`
+  pokriva iste slučajeve. `requests` broji samo SIA poruke (kao ranije –
+  heartbeat se nije brojao, unknown je ranije pucao pre brojanja).
+  `Processor` još nema polja za bazu/prosleđivanje (vidi „Promene ugovora“).
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (i `-race`). Novi
+  testovi: `TestProcessNil`, `TestProcessPush` (3 događaja iz 2 bloka),
+  `TestProcessRequests`, `TestFormatEvent`, `TestHandleConnectionPush`
+  (2 događaja → 2 SIA u kanalu, proverava i `time`),
+  `TestHandleConnectionUnknown` (smeće i nezavršen blok → ACK, handler se
+  vraća, ništa u Push), `TestHandleConnectionHeartbeat`.
+- Za sledeći korak:
+  - Korak 5 je samo `store.go` (OpenStore/Save/Close) – u `Processor` ga
+    uvodi tek korak 6 (dodati polja `Store *Store`, `StoreHeartbeats bool`;
+    snimanje staviti u `Process` pre `switch`-a/ranih `return`-ova jer se
+    unknown i (opciono) heartbeat takođe snimaju).
+  - `m.Time` je lokalno vreme (`time.Now()`); za `received_at` koristiti
+    `m.Time.UTC().Format("2006-01-02T15:04:05.000Z")`.
+  - Test pomoćnici u `utcar_test.go`: `startServer(t, p)` (jedna konekcija,
+    vraća addr i `done`), `sendMessage(t, addr, msg)` (dopunjuje NUL-ovima do
+    bloka od 8 bajtova i proverava ACK), `waitDone(t, done)`.
+  - Testovi u package `main`, poruke za test: `ParseMessage([]byte(...))`
+    sa primerima iz `processor_test.go`/`sia_test.go`.
 
 ### Korak 3 – Tabela SIA kodova (2026-10-07)
 - Urađeno: novi `siacodes.go` – `siaCodes map[string]string` (304 SIA DC-03
