@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 10 – Dokumentacija, Docker, završna provera**
+**Nema – plan završen**
 
 ## Grana
 
@@ -26,7 +26,7 @@ upiši je ovde).
 | 7 | DC-09 okvir | ✅ gotovo | dc09.go (CRC16, DC09Frame, BuildFrame, ParseResponse) |
 | 8 | Forwarder | ✅ gotovo | forwarder.go (NewForwarder/Start/Enqueue/Stop) |
 | 9 | Integracija prosleđivanja | ✅ gotovo | Processor.Forwarders, --forward* |
-| 10 | Dokumentacija, Docker, završna provera | 🔧 u toku | |
+| 10 | Dokumentacija, Docker, završna provera | ✅ gotovo | README, Dockerfile, maxForwardNAKs |
 
 Statusi: ⬜ nije počet · ⏳ sledeći · 🔧 u toku (prekinut) · ✅ gotovo · ⛔ blokiran
 
@@ -58,6 +58,11 @@ brojem koraka. Sledeći koraci ovo imaju prednost nad `PLAN.md`.)
   ne prosleđuje forwarderima u `dc09` formatu (samo u `raw`). Nove pomoćne
   funkcije u `utcar.go`: `forwardSpecs(values)` (deli po zarezu – viper
   **ne** deli `UTCAR_FORWARD`, provereno) i `newForwarders(specs, opts)`.
+- Korak 10 (odluka korisnika): forwarder odustaje od SIA poruke posle
+  `maxForwardNAKs` (5) **uzastopnih** `NAK` odgovora (greška veze/timeout
+  resetuje brojač i ponavlja se bez ograničenja). Ponavlja se samo
+  `KindSIA` (ranije sve osim heartbeat-a) – `unknown` u `raw` formatu ima
+  jedan pokušaj.
 
 ## Otvorena pitanja za korisnika
 
@@ -73,9 +78,18 @@ postavi pitanje i stane.)
   po odluci korisnika ne dira.
 - `utcar.go`: greška debug servera se proverava pre nego što goroutine stigne
   da je postavi.
+- (pregled, korak 10) `CR`/`LF` unutar data bloka (npr. u tekstu `*'a\rb'`)
+  prelazi neizmenjen u DC-09 okvir – centar bi ga odbio (posle 5 NAK poruka
+  se odbacuje). Rešenje: `BuildFrame` da vrati grešku za telo sa `\r`/`\n`.
+- (pregled, korak 10) `store.go`: putanja baze se ubacuje u DSN bez
+  escape-ovanja – putanja sa `?` ili `#` otvara pogrešan fajl / gubi pragme.
+- (pregled, korak 10) Heartbeat čiji je nalog samo `X` (prazan `Account`) u
+  `dc09` formatu svakog minuta loguje „message not forwarded“ (samo šum).
+- `docker stop` šalje SIGTERM, koji se ne hvata (Go izlazi sa kodom 2) – isto
+  kao CTRL-C: baza/forwarderi se ne zatvaraju uredno (podaci su bezbedni).
 - `pusher.go`: `InsecureSkipVerify: true`.
-- `gofmt -l .` prijavljuje `pusher.go`, `util.go`, `util_test.go` – bili su
-  neformatirani i pre koraka 1 (ne dirati `pusher.go`; ostale po želji u koraku 10).
+- `gofmt -l .` prijavljuje `pusher.go` – bio je neformatiran i pre koraka 1
+  (ne dira se). `util.go`/`util_test.go` formatirani u koraku 10.
 - Pusher prima **svaki** događaj (ne samo prvi kao ranije); za sve kodove osim
   UA/UR `HttpPost` vraća grešku → u logu `Push error: Unsupported SIA command`
   (isto ponašanje kao ranije za npr. RP). `pchan` je nebaferovan, pa
@@ -85,7 +99,8 @@ postavi pitanje i stane.)
   transakcija, WAL se oporavlja pri sledećem otvaranju), ostaju `-wal`/`-shm`
   fajlovi. Isto važi za forwardere (`defer f.Stop()` u `run()` se ne izvršava;
   poruke u redu se gube pri gašenju – i inače se gube jer red nije trajan).
-  Rešiti u koraku 10 ako treba (npr. signal handler koji zatvara resurse).
+  Nije rešavano u koraku 10 (van plana) – opisano u README; eventualno
+  proširenje: signal handler (SIGINT/SIGTERM) koji zatvara resurse.
 - Red forwardera je samo u memoriji: restart utcar-a gubi neposlate poruke
   (u bazi ostaju). Van plana – eventualno proširenje.
 - `run()` otvara bazu posle `net.Listen` – greška baze je fatalna, ali port je
@@ -103,6 +118,35 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 10 – Dokumentacija, Docker, završna provera (2026-10-07)
+- Urađeno: README – lista funkcija, svi flagovi + tabela env promenljivih,
+  primeri (baza + 2 centra, flagovi i env), sekcije „Messages“ (parsiranje,
+  primer loga), „Pushing to openHAB“, „Storing messages in a database“ (šema,
+  4 SQL primera – provereno na pravoj bazi kroz privremeni test), „Forwarding
+  to monitoring centers“ (spec, `dc09`/`raw` i nalaz o `0101` prefiksu,
+  pravila ACK/NAK/DUH/timeout, red samo u memoriji), Docker sa volume-om,
+  build sa `CGO_ENABLED=0` (ispravljen i stari primer `docker run --addr`).
+  `Dockerfile`: komentar za build + `VOLUME /data`. `gofmt` na
+  `util.go`/`util_test.go`.
+- Pregled celog diff-a od koraka 0 (agent + fuzz `ParseMessage`/`BuildFrame`/
+  `ParseResponse` 60s, bez panic-a): glavni nalaz – SIA poruka koju centar
+  stalno odbija (`NAK`) blokira red zauvek (npr. `raw` ka pravom DC-09
+  centru, stara vremenska oznaka posle dugog prekida). Korisnik izabrao:
+  ograničiti NAK → `maxForwardNAKs = 5` u `forwarder.go` (vidi „Promene
+  ugovora“). Ostali nalazi (CR/LF u bloku, DSN escape, prazan nalog
+  heartbeat-a) upisani u „Poznati problemi“.
+- Fajlovi: `README.md`, `Dockerfile`, `forwarder.go`, `forwarder_test.go`,
+  `util.go`, `util_test.go`, `plan/PLAN.md` (pravilo ponovnih pokušaja).
+- Provera: gofmt (svi osim `pusher.go`) ✅, go vet ✅, go test ✅ (i `-race
+  -count=3`). Novi testovi: `TestForwarderNAKGiveUp` (5 NAK → odustaje,
+  sledeća poruka isporučena), `TestForwarderRawUnknownNoRetry`. Ručno:
+  statički binar (`CGO_ENABLED=0`, `ldd`: not a dynamic executable) sa
+  `env -i UTCAR_DB=… UTCAR_FORWARD=a,b` pravi bazu i loguje 2 forwardera.
+  Docker build nije proveren (nema docker daemona u okruženju).
+- Za sledeći korak: plan je završen. Predlog: PR iz
+  `claude/amazing-thompson-cucp4s`; proširenja u „Moguća proširenja“
+  (`PLAN.md`) i „Poznati problemi“.
 
 ### Korak 9 – Integracija prosleđivanja (2026-10-07)
 - Urađeno: `Processor` dobio `Forwarders []*Forwarder` i `ForwardHeartbeats

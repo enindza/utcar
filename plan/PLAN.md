@@ -45,7 +45,8 @@ i to se onda zapiše u dnevnik u `STANJE.md`.
 - Svaki centar ima **svoj red i svoju goroutine**; pad jednog ne blokira drugi
   ni prijem od alarma. Redosled poruka ka jednom centru se čuva.
 - Ponovni pokušaji: događaji – dok ne uspe (backoff 1s → max 60s); heartbeat
-  (NULL) – jedan pokušaj, bez ponavljanja. Pun red → poruka se odbacuje uz
+  (NULL) – jedan pokušaj, bez ponavljanja. (Korak 10, odluka korisnika: posle
+  5 uzastopnih `NAK`-ova SIA poruka se odbacuje; `unknown` u `raw` – jedan pokušaj.) Pun red → poruka se odbacuje uz
   `log` upozorenje.
 - Odgovor centra: `"ACK"` = uspeh; `"NAK"` ili timeout/prekid = ponovi;
   `"DUH"` = centar ne podržava poruku → odustani (log).

@@ -164,6 +164,40 @@ func TestForwarderNAKRetry(t *testing.T) {
 	c.none()
 }
 
+func TestForwarderNAKGiveUp(t *testing.T) {
+	// the center keeps rejecting the first message, accepts the second one
+	c := newFakeCenter(t, "127.0.0.1:0", func(_ int, frame string) []byte {
+		if strings.Contains(frame, "NUA021") {
+			return centerResponse(ResponseNAK)
+		}
+		return centerResponse(ResponseACK)
+	})
+	f := startForwarder(t, c.Addr(), testForwardOptions)
+
+	enqueue(t, f, testForwardSIA)
+	enqueue(t, f, testForwardSIA2)
+	for i := 0; i < maxForwardNAKs; i++ {
+		if got := c.next(); !strings.Contains(got, "NUA021") {
+			t.Fatalf("attempt %d: frame %q, want the first message", i+1, got)
+		}
+	}
+	if got := c.next(); !strings.Contains(got, "NUR021") {
+		t.Errorf("frame %q, want the second message", got)
+	}
+	c.none()
+}
+
+func TestForwarderRawUnknownNoRetry(t *testing.T) {
+	c := newFakeCenter(t, "127.0.0.1:0", always(ResponseNAK))
+	f := startForwarder(t, "tcp://"+c.Addr()+"?format=raw", testForwardOptions)
+
+	enqueue(t, f, "garbage")
+	if got := c.next(); got != "\ngarbage\r" {
+		t.Errorf("frame %q, want %q", got, "\ngarbage\r")
+	}
+	c.none()
+}
+
 func TestForwarderTimeoutRetry(t *testing.T) {
 	c := newFakeCenter(t, "127.0.0.1:0", func(n int, _ string) []byte {
 		if n == 1 {

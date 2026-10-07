@@ -32,15 +32,23 @@ const (
 	DefaultForwardMaxBackoff = 60 * time.Second
 )
 
+// maxForwardNAKs is the number of consecutive NAK responses after which a
+// message is dropped: a center that keeps rejecting a frame (e.g. a raw frame
+// without a valid DC-09 CRC, or an outdated timestamp) would otherwise block
+// the queue forever.
+const maxForwardNAKs = 5
+
 // Forwarder sends messages to a monitoring center over TCP, one connection
 // per message, and waits for the center's response. Messages are queued and
 // sent in order by a single goroutine, so a slow or unreachable center
 // doesn't block the reception of messages from the alarm system (nor the
 // other centers).
 //
-// Events are retried (with an exponential backoff) until the center accepts
-// them with "ACK" or rejects them with "DUH". A heartbeat ("NULL" link test)
-// gets a single attempt.
+// SIA messages are retried (with an exponential backoff) until the center
+// accepts them with "ACK", rejects them with "DUH" or answers maxForwardNAKs
+// consecutive times with "NAK"; connection errors and timeouts are retried
+// without limit. Other messages (a heartbeat as "NULL" link test, an unknown
+// message in raw format) get a single attempt.
 type Forwarder struct {
 	addr   string // host:port
 	format string // FormatDC09 or FormatRaw
@@ -57,7 +65,7 @@ type Forwarder struct {
 // attempt sends the same frame (with the same sequence number).
 type forwardItem struct {
 	frame []byte
-	retry bool   // retry until delivered (false for heartbeats)
+	retry bool   // retry until delivered (SIA messages only)
 	desc  string // for the log
 }
 
@@ -177,7 +185,7 @@ func (f *Forwarder) Enqueue(m *Message) bool {
 		log.Printf("Forwarder %s: WARNING: message not forwarded (%v)", f.addr, err)
 		return false
 	}
-	item := forwardItem{frame: frame, retry: m.Kind != KindHeartbeat, desc: describeForward(m)}
+	item := forwardItem{frame: frame, retry: m.Kind == KindSIA, desc: describeForward(m)}
 	select {
 	case f.queue <- item:
 		return true
@@ -215,6 +223,7 @@ func (f *Forwarder) run() {
 // if item.retry is set), or the forwarder is stopped.
 func (f *Forwarder) deliver(item forwardItem) {
 	backoff := f.opts.MinBackoff
+	naks := 0 // consecutive NAK responses
 	for attempt := 1; ; attempt++ {
 		status, err := f.send(item.frame)
 		if f.ctx.Err() != nil {
@@ -229,8 +238,17 @@ func (f *Forwarder) deliver(item forwardItem) {
 		case err == nil && status == ResponseDUH:
 			log.Printf("Forwarder %s: WARNING: %s rejected by the center (DUH), giving up", f.addr, item.desc)
 			return
+		case err == nil && status == ResponseNAK:
+			naks++
+			if item.retry && naks >= maxForwardNAKs {
+				log.Printf("Forwarder %s: WARNING: %s rejected by the center (%d x NAK), giving up", f.addr, item.desc, naks)
+				return
+			}
+			err = fmt.Errorf("response %s", status)
 		case err == nil:
 			err = fmt.Errorf("response %s", status)
+		default:
+			naks = 0
 		}
 		if !item.retry {
 			log.Printf("Forwarder %s: %s not delivered (%v)", f.addr, item.desc, err)

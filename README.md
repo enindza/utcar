@@ -210,10 +210,15 @@ uses a new TCP connection and waits for the center's response
 (`--forward-timeout`, default 10s, for connecting and for the response):
 
 * `ACK` – delivered.
-* `NAK`, timeout or connection error – an event message is retried until it is
-  delivered (backoff 1s, doubling up to 60s); a heartbeat (`NULL`) is tried
-  only once.
+* Timeout or connection error – an event message is retried until it is
+  delivered (backoff 1s, doubling up to 60s), however long the center is down.
+* `NAK` – retried the same way, but after 5 consecutive `NAK`s the message is
+  dropped (logged), so that a message the center keeps rejecting doesn't block
+  the queue.
 * `DUH` – the center doesn't support the message; it is dropped (logged).
+
+A heartbeat (`NULL`) and an unrecognized message (`raw` format) are tried only
+once.
 
 Heartbeats are forwarded as DC-09 `NULL` messages (numbered 0001–9999; in
 `raw` format as received) unless `--forward-heartbeats=false`.
