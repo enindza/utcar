@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -156,5 +157,79 @@ func TestParseMessageUnknown(t *testing.T) {
 	m := ParseMessage([]byte("\n  garbage \r\x00"))
 	if m.Raw != "  garbage " {
 		t.Errorf("Raw = %q", m.Raw)
+	}
+}
+
+func TestParseMessageEvents(t *testing.T) {
+	const prefix = "01010053\"SIA-DCS\"0007R0075L0001"
+	tests := []struct {
+		name   string
+		blocks string
+		want   []Event
+	}{
+		{"alarm with text", "[#001365|NUA021*'detector hall'NM]",
+			[]Event{{Code: "UA", Zone: "021", Text: "detector hall"}}},
+		{"test report with text", "[#001465|NRP000*'DECKERS'NM]",
+			[]Event{{Code: "RP", Zone: "000", Text: "DECKERS"}}},
+		{"area modifier", "[#001465|Nri1/BA001]",
+			[]Event{{Code: "BA", Zone: "001", Area: "1"}}},
+		{"area changes", "[#001465|Nri01/CL501/ri02/CL501]",
+			[]Event{{Code: "CL", Zone: "501", Area: "01"}, {Code: "CL", Zone: "501", Area: "02"}}},
+		{"time and user", "[#001465|Nti12:30/id5/OP001]",
+			[]Event{{Code: "OP", Zone: "001", User: "5", Time: "12:30"}}},
+		{"no modifiers", "[#001465|NBA1]",
+			[]Event{{Code: "BA", Zone: "1"}}},
+		{"no zone", "[#001465|NYR]",
+			[]Event{{Code: "YR"}}},
+		{"old event", "[#001465|OBA1]",
+			[]Event{{Code: "BA", Zone: "1"}}},
+		{"no N/O prefix", "[#001465|OP001]",
+			[]Event{{Code: "OP", Zone: "001"}}},
+		{"no account in block", "[Nri1/BA001]",
+			[]Event{{Code: "BA", Zone: "001", Area: "1"}}},
+		{"multiple events", "[#001465|Nri1/BA001/BA002/id3/OP001]",
+			[]Event{{Code: "BA", Zone: "001", Area: "1"}, {Code: "BA", Zone: "002", Area: "1"},
+				{Code: "OP", Zone: "001", Area: "1", User: "3"}}},
+		{"modifiers without slash", "[#001465|Nri2id7CL001]",
+			[]Event{{Code: "CL", Zone: "001", Area: "2", User: "7"}}},
+		{"unknown modifier ignored", "[#001465|Npi9/ri3/QQ123]",
+			[]Event{{Code: "QQ", Zone: "123", Area: "3"}}},
+		{"unknown code", "[#001465|NQQ123]",
+			[]Event{{Code: "QQ", Zone: "123"}}},
+		{"slash and bracket in text", "[#001465|NUA021*'a/b [1]'NM/UR022]",
+			[]Event{{Code: "UA", Zone: "021", Text: "a/b [1]"}, {Code: "UR", Zone: "022"}}},
+		{"multiple blocks", "[#001465|NUA021*'hall [1]'NM][#001465|Nri2/UR021]",
+			[]Event{{Code: "UA", Zone: "021", Text: "hall [1]"}, {Code: "UR", Zone: "021", Area: "2"}}},
+		{"modifiers don't cross blocks", "[#001465|Nri1/BA001][#001465|NBR001]",
+			[]Event{{Code: "BA", Zone: "001", Area: "1"}, {Code: "BR", Zone: "001"}}},
+		{"extended data block ignored", "[#001465|NBA1][XE0.0][H12:30:45]",
+			[]Event{{Code: "BA", Zone: "1"}}},
+		{"account only", "[#001465]", nil},
+		{"empty block", "[]", nil},
+		{"garbage", "[#001465|N12/??]", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := ParseMessage([]byte(prefix + tt.blocks))
+			if m.Kind != KindSIA {
+				t.Fatalf("Kind = %q, want sia (%q)", m.Kind, m.ParseError)
+			}
+			if !reflect.DeepEqual(m.Events, tt.want) {
+				t.Errorf("Events = %+v\nwant     %+v", m.Events, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseMessageEventsProtocol(t *testing.T) {
+	m := ParseMessage([]byte("00000000\"*SIA-DCS\"0010R0075L0001[#001465|NBA1]"))
+	if len(m.Events) != 1 || m.Events[0].Code != "BA" {
+		t.Errorf("*SIA-DCS: Events = %+v", m.Events)
+	}
+	for _, proto := range []string{"NULL", "ADM-CID"} {
+		m := ParseMessage([]byte("00000000\"" + proto + "\"0010R0075L0001[#001465|NBA1]"))
+		if m.Kind != KindSIA || len(m.Events) != 0 {
+			t.Errorf("%s: Kind = %q, Events = %+v", proto, m.Kind, m.Events)
+		}
 	}
 }

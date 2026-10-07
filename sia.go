@@ -105,30 +105,139 @@ func ParseMessage(data []byte) *Message {
 	}
 	m.Timestamp = timestampRegex.FindString(m.Raw[end:])
 	m.Kind = KindSIA
+	if m.Protocol == "SIA-DCS" || m.Protocol == "*SIA-DCS" {
+		m.Events = parseEvents(m.Blocks)
+	}
 	return m
 }
 
+// parseEvents extracts SIA events from the data blocks of a SIA-DCS
+// message. The first block always holds events ("[#acct|Nri1/BA001]" or
+// "[Nri1/BA001]"); further blocks only if they start with an account
+// ("[#acct|...]"), the rest are DC-09 extended data blocks ([X..], [H..] ...)
+// and are ignored.
+func parseEvents(blocks string) []Event {
+	var events []Event
+	for i, start := 0, 0; start < len(blocks) && blocks[start] == '['; i++ {
+		end, ok := blockEnd(blocks, start)
+		if !ok {
+			break
+		}
+		content := blocks[start+1 : end-1]
+		start = end
+		if strings.HasPrefix(content, "#") {
+			bar := strings.IndexByte(content, '|')
+			if bar < 0 {
+				continue // "[#acct]" - no events
+			}
+			content = content[bar+1:]
+		} else if i > 0 {
+			continue // extended data block
+		}
+		events = append(events, parseBlockEvents(content)...)
+	}
+	return events
+}
+
+var (
+	modifierRegex = regexp.MustCompile(`^([a-z]{2})([0-9:]*)`)
+	eventRegex    = regexp.MustCompile(`^[A-Z]{2}`)
+)
+
+// validToken reports whether s starts with a modifier or an event code.
+func validToken(s string) bool {
+	return modifierRegex.MatchString(s) || eventRegex.MatchString(s)
+}
+
+// parseBlockEvents parses the data of one block (without "#acct|"), e.g.
+// "Nri01/CL501/ri02/CL501" or "NUA021*'detector hall'NM". Modifiers (ri, id,
+// ti, ...) apply to all following events in the same block.
+func parseBlockEvents(data string) []Event {
+	if (strings.HasPrefix(data, "N") || strings.HasPrefix(data, "O")) && validToken(data[1:]) {
+		data = data[1:]
+	}
+	var events []Event
+	var area, user, tm string
+	for _, tok := range splitTokens(data) {
+		for tok != "" {
+			if match := modifierRegex.FindStringSubmatch(tok); match != nil {
+				switch match[1] {
+				case "ri":
+					area = match[2]
+				case "id":
+					user = match[2]
+				case "ti":
+					tm = match[2]
+				}
+				tok = tok[len(match[0]):]
+				continue
+			}
+			if eventRegex.MatchString(tok) {
+				ev := Event{Code: tok[:2], Area: area, User: user, Time: tm}
+				zone := tok[2:]
+				if star := strings.Index(zone, "*'"); star >= 0 {
+					text := zone[star+2:]
+					if q := strings.IndexByte(text, '\''); q >= 0 {
+						text = text[:q]
+					}
+					ev.Text = text
+					zone = zone[:star]
+				}
+				ev.Zone = zone
+				events = append(events, ev)
+			}
+			break // anything else is ignored
+		}
+	}
+	return events
+}
+
+// splitTokens splits s on '/' that are not inside '...' text.
+func splitTokens(s string) []string {
+	var tokens []string
+	inText := false
+	last := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			inText = !inText
+		case '/':
+			if !inText {
+				tokens = append(tokens, s[last:i])
+				last = i + 1
+			}
+		}
+	}
+	return append(tokens, s[last:])
+}
+
 // scanBlocks scans consecutive [...] groups starting at s[start] == '['.
-// A ']' inside '...' text doesn't close a block. It returns the position
-// right after the last closing bracket.
+// It returns the position right after the last closing bracket.
 func scanBlocks(s string, start int) (int, bool) {
 	i := start
 	for i < len(s) && s[i] == '[' {
-		inText := false
-		closed := false
-		for i++; i < len(s); i++ {
-			c := s[i]
-			if c == '\'' {
-				inText = !inText
-			} else if c == ']' && !inText {
-				closed = true
-				i++
-				break
-			}
+		end, ok := blockEnd(s, i)
+		if !ok {
+			return end, false
 		}
-		if !closed {
-			return i, false
-		}
+		i = end
 	}
 	return i, true
+}
+
+// blockEnd returns the position right after the ']' that closes the block
+// starting at s[start] == '['. A ']' inside '...' text doesn't close a block.
+func blockEnd(s string, start int) (int, bool) {
+	inText := false
+	for i := start + 1; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			inText = !inText
+		case ']':
+			if !inText {
+				return i + 1, true
+			}
+		}
+	}
+	return len(s), false
 }

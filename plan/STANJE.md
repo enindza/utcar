@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 2 – Parser SIA data bloka (događaji)**
+**Korak 3 – Tabela SIA kodova**
 
 ## Grana
 
@@ -17,9 +17,9 @@ upiši je ovde).
 | # | Korak | Status | Commit |
 |---|---|---|---|
 | 0 | Priprema (go.mod, plan, `/korak`) | ✅ gotovo | (ovaj commit) |
-| 1 | Model poruke i parser zaglavlja | ✅ gotovo | sia.go, ParseMessage, IsHeartbeat |
-| 2 | Parser SIA data bloka (događaji) | ⏳ sledeći | |
-| 3 | Tabela SIA kodova | ⬜ | |
+| 1 | Model poruke i parser zaglavlja | ✅ gotovo | 1af1d53 |
+| 2 | Parser SIA data bloka (događaji) | ✅ gotovo | parseEvents, parseBlockEvents |
+| 3 | Tabela SIA kodova | ⏳ sledeći | |
 | 4 | Processor i integracija parsera | ⬜ | |
 | 5 | SQLite store | ⬜ | |
 | 6 | Integracija baze | ⬜ | |
@@ -67,6 +67,37 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 2 – Parser SIA data bloka (događaji) (2026-10-07)
+- Urađeno: `ParseMessage` na kraju (za `KindSIA` i Protocol `SIA-DCS`/`*SIA-DCS`)
+  poziva `parseEvents(m.Blocks)` i puni `m.Events`. Za ostale protokole
+  (`NULL`, `ADM-CID`, ...) `Events` ostaje `nil`.
+- Fajlovi: `sia.go`, `sia_test.go`.
+- Odluke/odstupanja (u okviru ugovora):
+  - Blokovi: prvi blok uvek nosi događaje (sa `#acct|` ili bez njega);
+    sledeći blokovi samo ako počinju sa `#` (npr. `[#001465|NUR021]`). Ostali
+    (`[XE0.0]`, `[H12:30:45]` – DC-09 extended data) se ignorišu.
+    `[#acct]` i `[]` nemaju događaje.
+  - `N`/`O` na početku podataka bloka se skida samo ako ostatak počinje sa
+    `[a-z]{2}` ili `[A-Z]{2}` (`OP001` → OP/001, `OBA1` → BA/1).
+  - Tokeni se dele po `/` van `'...'`. Unutar tokena se redom čitaju
+    modifikatori `[a-z]{2}[0-9:]*` (pa radi i `Nri2id7CL001` bez kosih crta),
+    zatim `[A-Z]{2}` + ostatak = događaj; sve ostalo se ignoriše.
+    Modifikatori važe do kraja bloka (ne prelaze u sledeći blok).
+  - `*'tekst'XX` → `Text` = sadržaj između navodnika, `Zone` = deo pre `*`.
+  - Nepoznat kod (`QQ`) se ipak vraća kao događaj; `Description` ostaje `""`.
+  - Refaktor: `scanBlocks` sada koristi novu `blockEnd(s, start) (int, bool)`
+    (jedan blok); `parseEvents` koristi istu funkciju.
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (novi:
+  `TestParseMessageEvents` – 21 slučaj, `TestParseMessageEventsProtocol`).
+- Za sledeći korak:
+  - `Description` popuniti u `parseBlockEvents` (sia.go, mesto gde se pravi
+    `ev := Event{Code: tok[:2], ...}`) sa `DescribeSIA(ev.Code)`, ili posle
+    `parseEvents` u `ParseMessage` petljom po `m.Events`.
+  - U `TestParseMessageEvents` očekivani događaji nemaju `Description` i
+    porede se sa `reflect.DeepEqual` – kad se Description popuni, test treba
+    prilagoditi (npr. postaviti `Description = ""` pre poređenja, ili dodati
+    očekivane opise). Kod `QQ` mora ostati sa praznim opisom.
 
 ### Korak 1 – Model poruke i parser zaglavlja (2026-10-07)
 - Urađeno: novi `sia.go` sa tipovima `MessageKind`, `Event`, `Message` (po
