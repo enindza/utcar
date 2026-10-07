@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 5 – SQLite store**
+**Korak 6 – Integracija baze**
 
 ## Grana
 
@@ -21,8 +21,8 @@ upiši je ovde).
 | 2 | Parser SIA data bloka (događaji) | ✅ gotovo | parseEvents, parseBlockEvents |
 | 3 | Tabela SIA kodova | ✅ gotovo | siacodes.go, DescribeSIA |
 | 4 | Processor i integracija parsera | ✅ gotovo | processor.go, handleConnection(c, p) |
-| 5 | SQLite store | ⏳ sledeći | |
-| 6 | Integracija baze | ⬜ | |
+| 5 | SQLite store | ✅ gotovo | store.go (OpenStore/Save/Close) |
+| 6 | Integracija baze | ⏳ sledeći | |
 | 7 | DC-09 okvir | ⬜ | |
 | 8 | Forwarder | ⬜ | |
 | 9 | Integracija prosleđivanja | ⬜ | |
@@ -39,6 +39,9 @@ brojem koraka. Sledeći koraci ovo imaju prednost nad `PLAN.md`.)
   `StoreHeartbeats` dodaje korak 6, `Forwarders` i `ForwardHeartbeats` korak 9
   (tipovi `Store`/`Forwarder` još ne postoje). Potpis `Process` je po ugovoru.
 - Korak 4: `ParseSIA` (i `parser.go`, `parser_test.go`) uklonjeni.
+- Korak 5: `go.mod` sada ima `go 1.24.0` (umesto `go 1.24`) – `modernc.org/sqlite`
+  v1.40.1 i `golang.org/x/sys` v0.36.0 to traže; i dalje je Go 1.24. Linija
+  `toolchain` je uklonjena (`go mod edit -toolchain=none`).
 
 ## Otvorena pitanja za korisnika
 
@@ -74,6 +77,40 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 5 – SQLite store (2026-10-07)
+- Urađeno: zavisnost `modernc.org/sqlite@v1.40.1`. Novi `store.go`:
+  `Store{db *sql.DB}`, `OpenStore(path)` (DSN `file:<path>?_pragma=busy_timeout(5000)
+  &_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)`, `SetMaxOpenConns(1)`,
+  kreira šemu iz `PLAN.md` – `CREATE ... IF NOT EXISTS`), `Save(m)` (jedna
+  transakcija: red u `messages` + red po događaju u `events`; vraća id iz
+  `messages`; `Save(nil)` → greška; nulto `m.Time` → `time.Now()`),
+  `Close()`. `received_at` = `m.Time.UTC().Format(storeTimeFormat)`
+  (`"2006-01-02T15:04:05.000Z"`).
+- Fajlovi: `store.go` (nov), `store_test.go` (nov), `go.mod`, `go.sum`.
+- Odluke/odstupanja: prazni stringovi se snimaju kao `''` (ne NULL), i za
+  `parse_error`. Kolona `kind` = `string(m.Kind)`. `go 1.24.0` u `go.mod`
+  (vidi „Promene ugovora“). `Store` nije vezan za `Processor` (to je korak 6).
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (i `-race`). Novi
+  testovi: `TestStoreSaveSIA` (2 događaja iz 2 bloka sa ri/id/tekstom, UTC
+  konverzija `received_at` iz CEST), `TestStoreSaveHeartbeatAndUnknown`,
+  `TestStoreSaveNil`, `TestStoreReopen` (podaci ostaju posle ponovnog
+  otvaranja, `journal_mode` = `wal`), `TestOpenStoreError` (nepostojeći dir).
+- Za sledeći korak:
+  - Dodati u `Processor` polja `Store *Store` i `StoreHeartbeats bool`; `Save`
+    pozvati na početku `Process` (posle `m == nil` provere, pre `switch`-a), a
+    heartbeat preskočiti ako `!p.StoreHeartbeats`. Greška `Save` → samo `log`
+    (ne prekidati obradu).
+  - Flagovi `--db` (default `""`) i `--db-heartbeats` (`false`) u `utcar.go`;
+    viper treba `SetEnvKeyReplacer(strings.NewReplacer("-", "_"))` za
+    `UTCAR_DB_HEARTBEATS`. U `run()`: ako `--db != ""` → `OpenStore`, greška =
+    fatalna, `defer store.Close()`.
+  - Test pomoćnici u `store_test.go`: `openTestStore(t)` (vraća `*Store` i
+    putanju, zatvara u `t.Cleanup`), `readMessage(t, s, id)` →
+    `storedMessage`, `readEvents(t, s, id)` → `[]Event`. Broj redova:
+    `s.db.QueryRow("SELECT COUNT(*) FROM messages")`.
+  - `Save` je bezbedan za istovremene pozive (jedna konekcija; `database/sql`
+    serijalizuje).
 
 ### Korak 4 – Processor i integracija parsera (2026-10-07)
 - Urađeno: novi `processor.go` – `Processor{Push chan SIA}` i
