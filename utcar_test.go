@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
 	"net"
@@ -287,5 +288,88 @@ func TestNewForwarders(t *testing.T) {
 	}
 	if fs, err := newForwarders(nil, ForwarderOptions{}); err != nil || len(fs) != 0 {
 		t.Errorf("newForwarders(nil) = %v, %v, want no forwarders", fs, err)
+	}
+}
+
+// startServe runs serve on a free port until the test cancels it.
+func startServe(t *testing.T, p *Processor) (string, context.CancelFunc, chan struct{}) {
+	l, addr := listen()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serve(ctx, l, p)
+	}()
+	return addr, cancel, done
+}
+
+func TestServeShutdown(t *testing.T) {
+	store, err := OpenStore(t.TempDir() + "/utcar.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	addr, cancel, done := startServe(t, &Processor{Store: store})
+
+	sendMessage(t, addr, `"SIA-DCS"0007R0075L0001[#001465|NUA021]`)
+
+	// connection in progress: key received, message not sent yet
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	key := readKey(client, t)
+
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("serve returned before the open connection finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// no new connections after shutdown
+	if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		c.Close()
+		t.Fatal("new connection accepted after shutdown")
+	}
+
+	// the open connection still gets its ACK and is stored
+	msg := []byte(`"SIA-DCS"0008R0075L0001[#001465|NUR021]`)
+	if _, err := client.Write(Encrypt3DESECB(padBlock(msg), key)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 8)
+	if _, err := io.ReadFull(client, buf); err != nil {
+		t.Fatalf("Failed to read ACK (%v)", err)
+	}
+	if ack := Decrypt3DESECB(buf, key); !bytes.Equal(ack, []byte("ACK\r\x00\x00\x00\x00")) {
+		t.Fatalf("ACK messages didn't match, was %v", ack)
+	}
+	waitDone(t, done)
+	if n := countRows(t, store, "messages"); n != 2 {
+		t.Errorf("Expected 2 stored messages, got %d", n)
+	}
+}
+
+func TestServeShutdownTimeout(t *testing.T) {
+	old := shutdownTimeout
+	shutdownTimeout = 200 * time.Millisecond
+	defer func() { shutdownTimeout = old }()
+	addr, cancel, done := startServe(t, nil)
+
+	// a connection that never sends its message
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	readKey(client, t)
+
+	start := time.Now()
+	cancel()
+	waitDone(t, done)
+	if d := time.Since(start); d < shutdownTimeout {
+		t.Errorf("serve returned after %v, before shutdownTimeout %v", d, shutdownTimeout)
 	}
 }

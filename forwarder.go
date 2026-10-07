@@ -226,7 +226,8 @@ func (f *Forwarder) deliver(item forwardItem) {
 	naks := 0 // consecutive NAK responses
 	for attempt := 1; ; attempt++ {
 		status, err := f.send(item.frame)
-		if f.ctx.Err() != nil {
+		if f.ctx.Err() != nil && (err != nil || status != ResponseACK) {
+			log.Printf("Forwarder %s: stopped, %s not delivered", f.addr, item.desc)
 			return
 		}
 		switch {
@@ -259,6 +260,7 @@ func (f *Forwarder) deliver(item forwardItem) {
 		select {
 		case <-f.ctx.Done():
 			t.Stop()
+			log.Printf("Forwarder %s: stopped, %s not delivered", f.addr, item.desc)
 			return
 		case <-t.C:
 		}

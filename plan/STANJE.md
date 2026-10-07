@@ -85,8 +85,6 @@ postavi pitanje i stane.)
   escape-ovanja – putanja sa `?` ili `#` otvara pogrešan fajl / gubi pragme.
 - (pregled, korak 10) Heartbeat čiji je nalog samo `X` (prazan `Account`) u
   `dc09` formatu svakog minuta loguje „message not forwarded“ (samo šum).
-- `docker stop` šalje SIGTERM, koji se ne hvata (Go izlazi sa kodom 2) – isto
-  kao CTRL-C: baza/forwarderi se ne zatvaraju uredno (podaci su bezbedni).
 - `pusher.go`: `InsecureSkipVerify: true`.
 - `gofmt -l .` prijavljuje `pusher.go` – bio je neformatiran i pre koraka 1
   (ne dira se). `util.go`/`util_test.go` formatirani u koraku 10.
@@ -94,15 +92,8 @@ postavi pitanje i stane.)
   UA/UR `HttpPost` vraća grešku → u logu `Push error: Unsupported SIA command`
   (isto ponašanje kao ranije za npr. RP). `pchan` je nebaferovan, pa
   `handleConnection` čeka pusher (posle ACK-a, kao i ranije).
-- CTRL-C (`receiveSignal`) radi `os.Exit(0)`, pa se `defer store.Close()` u
-  `run()` ne izvršava. Podaci su bezbedni (svaki `Save` je commit-ovana
-  transakcija, WAL se oporavlja pri sledećem otvaranju), ostaju `-wal`/`-shm`
-  fajlovi. Isto važi za forwardere (`defer f.Stop()` u `run()` se ne izvršava;
-  poruke u redu se gube pri gašenju – i inače se gube jer red nije trajan).
-  Nije rešavano u koraku 10 (van plana) – opisano u README; eventualno
-  proširenje: signal handler (SIGINT/SIGTERM) koji zatvara resurse.
 - Red forwardera je samo u memoriji: restart utcar-a gubi neposlate poruke
-  (u bazi ostaju). Van plana – eventualno proširenje.
+  (u bazi ostaju; pri gašenju se loguju). Van plana – eventualno proširenje.
 - `run()` otvara bazu posle `net.Listen` – greška baze je fatalna, ali port je
   kratko bio otvoren (bez posledica).
 
@@ -118,6 +109,28 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Dodatak – uredno gašenje (`docker stop`, CTRL-C) (2026-10-07)
+- Povod: test minimalnog kontejnera – `docker stop` je gasio utcar sa
+  izlaznim kodom 2 (SIGTERM se nije hvatao), CTRL-C je radio `os.Exit(0)`;
+  baza i forwarderi se nisu zatvarali.
+- Urađeno: `receiveSignal` uklonjen. `run()` koristi
+  `signal.NotifyContext(SIGINT, SIGTERM)`; posle prvog signala `stop()` vraća
+  podrazumevano ponašanje (drugi signal gasi odmah). Nova funkcija
+  `serve(ctx, l, p)` (petlja `Accept` premeštena iz `run()`): na `ctx.Done`
+  loguje „Shutting down...“, zatvara listener, čeka otvorene konekcije
+  (`sync.WaitGroup`) najviše `shutdownTimeout` (5s, `var` zbog testova).
+  Zatim `defer`-i u `run()`: `Stop` forwardera, `Close` baze, „Stopped.“;
+  izlaz sa kodom 0. Forwarder sada loguje i poruku koja je bila u slanju /
+  čekala ponovni pokušaj: „stopped, <poruka> not delivered“.
+- Fajlovi: `utcar.go`, `utcar_test.go`, `forwarder.go`, `forwarder_test.go`,
+  `README.md` (sekcija „Stopping“).
+- Provera: gofmt (svi osim `pusher.go`) ✅, go vet ✅, go test ✅ (`-race
+  -count=3`). Novi testovi: `TestServeShutdown` (konekcija otvorena pre
+  signala dobija ACK i snima se, nove konekcije odbijene),
+  `TestServeShutdownTimeout`; `TestForwarderStop` proverava novi log.
+  Ručno: `FROM scratch` kontejner – `docker stop` za 0,2 s, izlazni kod 0, u
+  `/data` ostaje samo `utcar.db` (bez `-wal`/`-shm`); binar na SIGINT isto.
 
 ### Korak 10 – Dokumentacija, Docker, završna provera (2026-10-07)
 - Urađeno: README – lista funkcija, svi flagovi + tabela env promenljivih,

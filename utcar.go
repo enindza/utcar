@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"expvar"
 	"fmt"
 	"io"
@@ -12,6 +13,9 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -171,18 +175,64 @@ func handleConnection(c net.Conn, p *Processor) {
 	p.Process(m)
 }
 
-func receiveSignal() {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+// shutdownTimeout is how long serve waits for open connections after a
+// shutdown signal (docker stop sends SIGKILL after 10s by default).
+var shutdownTimeout = 5 * time.Second
+
+// serve accepts connections from the alarm system until ctx is done. Then it
+// stops accepting and waits (at most shutdownTimeout) for open connections.
+func serve(ctx context.Context, l net.Listener, p *Processor) {
+	var stopping atomic.Bool
 	go func() {
-		<-sig
-		os.Exit(0)
+		<-ctx.Done()
+		log.Println("Shutting down...")
+		stopping.Store(true)
+		l.Close() // unblocks Accept
 	}()
+
+	var wg sync.WaitGroup
+	for { // until shutdown...
+		// Wait for a connection
+		conn, err := l.Accept()
+		if err != nil {
+			if stopping.Load() {
+				break
+			}
+			log.Fatal(err)
+		}
+		// Handle the connection in a new routine
+		// The loop then returns to accepting, so that
+		// multiple connections may be served concurrently.
+		wg.Add(1)
+		go func(c net.Conn) {
+			defer wg.Done()
+			defer c.Close()
+
+			handleConnection(c, p)
+		}(conn)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		log.Printf("Shutdown: open connections didn't finish within %v\n", shutdownTimeout)
+	}
 }
 
 func run() {
-	// setup response to CTRL-C
-	receiveSignal()
+	// setup response to CTRL-C and docker stop (SIGTERM): shut down cleanly
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer log.Println("Stopped.") // deferred first: runs after all cleanup
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop() // a second signal kills immediately
+	}()
 	// Listen on TCP port 12300 on all interfaces
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", viper.GetInt("port")))
 	if err != nil {
@@ -256,21 +306,8 @@ func run() {
 		ForwardHeartbeats: viper.GetBool("forward-heartbeats"),
 	}
 
-	for { // eternally...
-		// Wait for a connection
-		conn, err := l.Accept()
-		if err != nil {
-			log.Fatal(err)
-		}
-		// Handle the connection in a new routine
-		// The loop then returns to accepting, so that
-		// multiple connections may be served concurrently.
-		go func(c net.Conn) {
-			defer c.Close()
-
-			handleConnection(c, p)
-		}(conn)
-	}
+	serve(ctx, l, p)
+	// deferred calls stop the forwarders and close the database
 }
 
 func main() {

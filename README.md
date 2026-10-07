@@ -225,13 +225,32 @@ Heartbeats are forwarded as DC-09 `NULL` messages (numbered 0001–9999; in
 
 **The queue is kept in memory only**: messages that are not yet delivered are
 lost when _utcar_ stops or restarts (they remain in the database, if one is
-used). A full queue drops new messages with a warning in the log.
+used); they are reported in the log when _utcar_ stops (see
+[Stopping](#stopping)). A full queue drops new messages with a warning in the
+log.
 
 Example log:
 
 	Forwarder 10.0.0.2:5001: SIA-DCS message 0008 (account 001465) not delivered (dial tcp 10.0.0.2:5001: connect: connection refused), retrying in 1s
 	Forwarder 10.0.0.1:5000: delivered SIA-DCS message 0008 (account 001465) (attempt 1)
 	Forwarder 10.0.0.2:5001: delivered SIA-DCS message 0008 (account 001465) (attempt 3)
+
+## Stopping
+
+CTRL-C (SIGINT) and `docker stop` (SIGTERM) shut _utcar_ down cleanly:
+
+1. it stops accepting new connections from the alarm system,
+2. waits up to 5 seconds for open connections to finish (their messages are
+   still acknowledged, stored and queued),
+3. stops forwarding (undelivered messages are logged) and closes the database,
+4. exits with code 0.
+
+A second signal during the shutdown stops _utcar_ immediately.
+
+	Shutting down...
+	Forwarder 10.0.0.2:5001: stopped, SIA-DCS message 0007 (account 001465) not delivered
+	Forwarder 10.0.0.2:5001: stopped, 1 queued message(s) dropped
+	Stopped.
 
 ## Running in a container
 

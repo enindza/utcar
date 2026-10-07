@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"io"
+	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -366,6 +369,9 @@ func TestForwarderStop(t *testing.T) {
 			enqueue(t, f, testForwardSIA)
 			c.next()
 
+			var logs bytes.Buffer
+			log.SetOutput(&logs)
+			defer log.SetOutput(os.Stderr)
 			done := make(chan struct{})
 			go func() {
 				f.Stop()
@@ -375,6 +381,10 @@ func TestForwarderStop(t *testing.T) {
 			case <-done:
 			case <-time.After(2 * time.Second):
 				t.Fatal("Stop didn't return")
+			}
+			log.SetOutput(os.Stderr) // the goroutine is done; no more writes to logs
+			if want := "stopped, SIA-DCS message 0008 (account 001465) not delivered"; !strings.Contains(logs.String(), want) {
+				t.Errorf("Expected log %q, got %q", want, logs.String())
 			}
 			c.none()
 		})
