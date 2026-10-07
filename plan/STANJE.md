@@ -5,7 +5,7 @@
 
 ## Sledeći korak
 
-**Korak 6 – Integracija baze**
+**Korak 7 – DC-09 okvir**
 
 ## Grana
 
@@ -22,8 +22,8 @@ upiši je ovde).
 | 3 | Tabela SIA kodova | ✅ gotovo | siacodes.go, DescribeSIA |
 | 4 | Processor i integracija parsera | ✅ gotovo | processor.go, handleConnection(c, p) |
 | 5 | SQLite store | ✅ gotovo | store.go (OpenStore/Save/Close) |
-| 6 | Integracija baze | ⏳ sledeći | |
-| 7 | DC-09 okvir | ⬜ | |
+| 6 | Integracija baze | ✅ gotovo | Processor.Store, --db, --db-heartbeats |
+| 7 | DC-09 okvir | ⏳ sledeći | |
 | 8 | Forwarder | ⬜ | |
 | 9 | Integracija prosleđivanja | ⬜ | |
 | 10 | Dokumentacija, Docker, završna provera | ⬜ | |
@@ -42,6 +42,8 @@ brojem koraka. Sledeći koraci ovo imaju prednost nad `PLAN.md`.)
 - Korak 5: `go.mod` sada ima `go 1.24.0` (umesto `go 1.24`) – `modernc.org/sqlite`
   v1.40.1 i `golang.org/x/sys` v0.36.0 to traže; i dalje je Go 1.24. Linija
   `toolchain` je uklonjena (`go mod edit -toolchain=none`).
+- Korak 6: `Processor` sada ima `Store *Store`, `Push chan SIA`,
+  `StoreHeartbeats bool` (još bez `Forwarders`/`ForwardHeartbeats` – korak 9).
 
 ## Otvorena pitanja za korisnika
 
@@ -64,6 +66,13 @@ postavi pitanje i stane.)
   UA/UR `HttpPost` vraća grešku → u logu `Push error: Unsupported SIA command`
   (isto ponašanje kao ranije za npr. RP). `pchan` je nebaferovan, pa
   `handleConnection` čeka pusher (posle ACK-a, kao i ranije).
+- CTRL-C (`receiveSignal`) radi `os.Exit(0)`, pa se `defer store.Close()` u
+  `run()` ne izvršava. Podaci su bezbedni (svaki `Save` je commit-ovana
+  transakcija, WAL se oporavlja pri sledećem otvaranju), ostaju `-wal`/`-shm`
+  fajlovi. Isto važi za buduće forwardere (`Stop`) – rešiti u koraku 9/10 ako
+  treba (npr. signal handler koji zatvara resurse).
+- `run()` otvara bazu posle `net.Listen` – greška baze je fatalna, ali port je
+  kratko bio otvoren (bez posledica).
 
 ## Dnevnik (handoff beleške)
 
@@ -77,6 +86,38 @@ Svaki korak dodaje unos **na vrh** ove sekcije, po šablonu:
 - Provera: go vet ✅, go test ✅ (broj testova / šta je pokriveno)
 - Za sledeći korak: ...
 ```
+
+### Korak 6 – Integracija baze (2026-10-07)
+- Urađeno: `Processor` dobio `Store *Store` i `StoreHeartbeats bool`;
+  `Process` posle `m == nil` provere zove `p.store(m)` (nova metoda: preskače
+  ako `p`/`Store` nil ili heartbeat uz `!StoreHeartbeats`; greška `Save` → samo
+  `log` „Database error: …“, obrada (log, push) se nastavlja). Snimaju se SIA i
+  unknown poruke. Flagovi `--db` (`""`) i `--db-heartbeats` (`false`) + viper
+  `SetEnvKeyReplacer("-", "_")` (`UTCAR_DB`, `UTCAR_DB_HEARTBEATS`). `run()`:
+  ako je `--db` zadat → `OpenStore` (greška = `log.Fatalf`), `defer Close()`,
+  log „Storing messages in … (heartbeats: …)“.
+- Fajlovi: `processor.go`, `utcar.go`, `processor_test.go`, `utcar_test.go`.
+- Odluke/odstupanja: u `run()` `OpenStore` koristi sopstveni `err` (unutar
+  `if` bloka), jer goroutine debug servera piše u spoljašnji `err` (race).
+  `Save` se poziva i kad je `p.Push` nil. Id iz `Save` se ne koristi.
+- Provera: gofmt (moji fajlovi) ✅, go vet ✅, go test ✅ (i `-race`). Novi
+  testovi: `TestProcessStore` (heartbeat/sia/garbage sa i bez
+  `StoreHeartbeats` – broj poruka, događaja i redosled `kind`),
+  `TestProcessStoreError` (zatvoren store → push i dalje radi),
+  `TestHandleConnectionStore` (end-to-end: SIA + heartbeat preko
+  `handleConnection` → 1 red u `messages` sa `received_at`, `remote`
+  127.0.0.1:port, `raw` bez LF, 2 događaja sa opisima; push 2). Ručno:
+  binar sa `UTCAR_DB`/`UTCAR_DB_HEARTBEATS` pravi bazu; nepostojeći dir → exit 1.
+- Za sledeći korak:
+  - Korak 7 je samo `dc09.go` (CRC16, DC09Frame, BuildFrame, ParseResponse) –
+    bez integracije u `Processor`.
+  - Test pomoćnik `countRows(t, s, table)` je u `processor_test.go`.
+  - Primeri poruka: `"0101005B\"SIA-DCS\"0008R0075L0001[#001465|NUA021*'hall'NM][#001465|NUR022]"`
+    – `Raw` sadrži sve, uključujući `0101005B` (CRC+dužina panela) ispred
+    navodnika; `Protocol` je bez navodnika. Za DC-09 okvir
+    telo treba sastaviti iz polja (`"SIA-DCS"0008R0075L0001#001465` + `Blocks`
+    + `Timestamp`), ne iz `Raw`. Heartbeat → `"NULL"` telo (`Sequence` je
+    prazan kod heartbeat-a – izabrati npr. `0000`), unknown u `dc09` → greška.
 
 ### Korak 5 – SQLite store (2026-10-07)
 - Urađeno: zavisnost `modernc.org/sqlite@v1.40.1`. Novi `store.go`:

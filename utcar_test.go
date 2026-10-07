@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -151,5 +153,53 @@ func TestHandleConnectionHeartbeat(t *testing.T) {
 	waitDone(t, done)
 	if len(p.Push) != 0 {
 		t.Errorf("heartbeat was pushed (%d)", len(p.Push))
+	}
+}
+
+func TestHandleConnectionStore(t *testing.T) {
+	s, _ := openTestStore(t)
+	p := &Processor{Store: s, Push: make(chan SIA, 10)}
+	before := time.Now()
+	msg := "\n0101005B\"SIA-DCS\"0008R0075L0001[#001465|NUA021*'hall'NM][#001465|NUR022]7C9677F21948CC12|#001465"
+	for _, m := range []string{msg, "SR0001L0001    001465XX    [ID5B9490D8]"} {
+		addr, done := startServer(t, p)
+		sendMessage(t, addr, m)
+		waitDone(t, done)
+	}
+
+	if n := countRows(t, s, "messages"); n != 1 {
+		t.Fatalf("%d messages stored, want 1 (heartbeat is not stored by default)", n)
+	}
+	var id int64
+	if err := s.db.QueryRow("SELECT id FROM messages").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	got := readMessage(t, s, id)
+	receivedAt, err := time.Parse(storeTimeFormat, got.ReceivedAt)
+	if err != nil {
+		t.Fatalf("received_at %q: %v", got.ReceivedAt, err)
+	}
+	if receivedAt.Before(before.Truncate(time.Millisecond)) || receivedAt.After(time.Now()) {
+		t.Errorf("received_at %v not between %v and now", receivedAt, before)
+	}
+	if !strings.HasPrefix(got.Remote, "127.0.0.1:") {
+		t.Errorf("remote = %q, want 127.0.0.1:port", got.Remote)
+	}
+	got.ReceivedAt, got.Remote = "", ""
+	want := storedMessage{Kind: "sia", Protocol: "SIA-DCS", Sequence: "0008", Receiver: "0075",
+		Line: "0001", Account: "001465", Raw: strings.Trim(msg, "\n")}
+	if got != want {
+		t.Errorf("stored message = %+v, want %+v", got, want)
+	}
+	events := readEvents(t, s, id)
+	wantEvents := []Event{
+		{Code: "UA", Description: DescribeSIA("UA"), Zone: "021", Text: "hall"},
+		{Code: "UR", Description: DescribeSIA("UR"), Zone: "022"},
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Errorf("stored events = %+v, want %+v", events, wantEvents)
+	}
+	if len(p.Push) != 2 {
+		t.Errorf("pushed %d SIA messages, want 2", len(p.Push))
 	}
 }

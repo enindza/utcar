@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -56,11 +57,15 @@ func Execute() {
 	rootCmd.PersistentFlags().String("pwd", "", "Target password")
 	rootCmd.PersistentFlags().Int("port", 12300, "Listen port number")
 	rootCmd.PersistentFlags().Int("debug", 0, "Debug server port number (default: no debug server)")
+	rootCmd.PersistentFlags().String("db", "", "SQLite database file (default: no database)")
+	rootCmd.PersistentFlags().Bool("db-heartbeats", false, "Store heartbeat messages in the database")
 	viper.BindPFlag("addr", rootCmd.PersistentFlags().Lookup("addr"))
 	viper.BindPFlag("user", rootCmd.PersistentFlags().Lookup("user"))
 	viper.BindPFlag("pwd", rootCmd.PersistentFlags().Lookup("pwd"))
 	viper.BindPFlag("port", rootCmd.PersistentFlags().Lookup("port"))
 	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
+	viper.BindPFlag("db", rootCmd.PersistentFlags().Lookup("db"))
+	viper.BindPFlag("db-heartbeats", rootCmd.PersistentFlags().Lookup("db-heartbeats"))
 
 	cobra.OnInitialize(initConfig)
 
@@ -72,6 +77,7 @@ func Execute() {
 
 func initConfig() {
 	viper.SetEnvPrefix("utcar") // uppercased automatically
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
 	viper.SetDefault("port", 12300)
 }
@@ -174,7 +180,20 @@ func run() {
 		}()
 	}
 
-	p := &Processor{Push: pchan}
+	// open database (if db is provided)
+	var store *Store
+	if path := viper.GetString("db"); path != "" {
+		// own err: the debug server goroutine may still assign the outer one
+		s, err := OpenStore(path)
+		if err != nil {
+			log.Fatalf("Failed to open database %s (%v)", path, err)
+		}
+		defer s.Close()
+		store = s
+		log.Printf("Storing messages in %s (heartbeats: %t)\n", path, viper.GetBool("db-heartbeats"))
+	}
+
+	p := &Processor{Store: store, Push: pchan, StoreHeartbeats: viper.GetBool("db-heartbeats")}
 
 	for { // eternally...
 		// Wait for a connection

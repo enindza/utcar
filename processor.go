@@ -6,10 +6,12 @@ import (
 )
 
 // Processor handles messages after they have been received, decrypted,
-// acknowledged and parsed: logging, counting and pushing to openHAB.
-// Storing (step 6) and forwarding (step 9) will be added here.
+// acknowledged and parsed: storing, logging, counting and pushing to openHAB.
+// Forwarding (step 9) will be added here.
 type Processor struct {
-	Push chan SIA // nil = no openHAB pusher
+	Store           *Store   // nil = no database
+	Push            chan SIA // nil = no openHAB pusher
+	StoreHeartbeats bool     // store heartbeats too (they arrive every minute)
 }
 
 // Process handles a parsed message. p may be nil (only logging and
@@ -18,6 +20,8 @@ func (p *Processor) Process(m *Message) {
 	if m == nil {
 		return
 	}
+	p.store(m)
+
 	switch m.Kind {
 	case KindHeartbeat:
 		log.Printf("Heartbeat from %s (account %s)", m.Remote, m.Account)
@@ -40,6 +44,20 @@ func (p *Processor) Process(m *Message) {
 	}
 	for _, e := range m.Events {
 		p.Push <- SIA{m.Time, m.Sequence, m.Receiver, m.Line, m.Account, e.Code, e.Zone}
+	}
+}
+
+// store saves m in the database (if any). Errors are only logged, so that a
+// database problem doesn't stop the processing of messages.
+func (p *Processor) store(m *Message) {
+	if p == nil || p.Store == nil {
+		return
+	}
+	if m.Kind == KindHeartbeat && !p.StoreHeartbeats {
+		return
+	}
+	if _, err := p.Store.Save(m); err != nil {
+		log.Printf("Database error: failed to store %s message from %s (%v)", m.Kind, m.Remote, err)
 	}
 }
 

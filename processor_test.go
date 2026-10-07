@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -68,5 +69,70 @@ func TestFormatEvent(t *testing.T) {
 		if got := formatEvent(tt.e); got != tt.want {
 			t.Errorf("formatEvent(%+v) = %q, want %q", tt.e, got, tt.want)
 		}
+	}
+}
+
+// countRows returns the number of rows in table.
+func countRows(t *testing.T, s *Store, table string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+func TestProcessStore(t *testing.T) {
+	heartbeat := "SR0001L0001    001465XX    [ID5B9490D8]"
+	sia := "0101005B\"SIA-DCS\"0008R0075L0001[#001465|NUA021*'hall'NM][#001465|NUR022]"
+	for _, tc := range []struct {
+		storeHeartbeats bool
+		messages        int
+	}{
+		{false, 2}, // sia + unknown
+		{true, 3},  // + heartbeat
+	} {
+		s, _ := openTestStore(t)
+		p := &Processor{Store: s, StoreHeartbeats: tc.storeHeartbeats}
+		for _, raw := range []string{heartbeat, sia, "garbage"} {
+			p.Process(ParseMessage([]byte(raw)))
+		}
+		if n := countRows(t, s, "messages"); n != tc.messages {
+			t.Errorf("StoreHeartbeats=%t: %d messages stored, want %d", tc.storeHeartbeats, n, tc.messages)
+		}
+		if n := countRows(t, s, "events"); n != 2 {
+			t.Errorf("StoreHeartbeats=%t: %d events stored, want 2", tc.storeHeartbeats, n)
+		}
+		var kinds []string
+		rows, err := s.db.Query("SELECT kind FROM messages ORDER BY id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var k string
+			if err := rows.Scan(&k); err != nil {
+				t.Fatal(err)
+			}
+			kinds = append(kinds, k)
+		}
+		rows.Close()
+		want := []string{"sia", "unknown"}
+		if tc.storeHeartbeats {
+			want = append([]string{"heartbeat"}, want...)
+		}
+		if !reflect.DeepEqual(kinds, want) {
+			t.Errorf("StoreHeartbeats=%t: kinds %v, want %v", tc.storeHeartbeats, kinds, want)
+		}
+	}
+}
+
+// A database error must not stop the processing (pushing) of a message.
+func TestProcessStoreError(t *testing.T) {
+	s, _ := openTestStore(t)
+	s.Close()
+	p := &Processor{Store: s, Push: make(chan SIA, 10)}
+	p.Process(ParseMessage([]byte("0101005B\"SIA-DCS\"0008R0075L0001[#001465|NUA021]")))
+	if len(p.Push) != 1 {
+		t.Errorf("pushed %d SIA messages after a database error, want 1", len(p.Push))
 	}
 }
