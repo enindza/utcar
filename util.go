@@ -96,7 +96,7 @@ func Encrypt3DESECB(input []byte, key []byte) []byte {
 }
 
 // Generate a random key (3DES)
-func GenerateKey() ([]byte) {
+func GenerateKey() []byte {
 	key := make([]byte, 24)
 	_, err := rand.Read(key)
 	if err != nil {
