@@ -1,0 +1,70 @@
+# Builds the utcar container image and publishes it to the GitHub Container
+# Registry: ghcr.io/<owner>/utcar
+#
+#   master branch -> :latest and :master
+#   other branch  -> :<branch> (e.g. claude-amazing-thompson-cucp4s)
+#   tag v1.2.3    -> :1.2.3
+name: Docker image
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build static binaries
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+        run: |
+          mkdir -p dist
+          GOARCH=amd64        go build -trimpath -ldflags="-s -w" -o dist/utcar-amd64 .
+          GOARCH=arm64        go build -trimpath -ldflags="-s -w" -o dist/utcar-arm64 .
+          GOARCH=arm GOARM=7  go build -trimpath -ldflags="-s -w" -o dist/utcar-armv7 .
+          GOARCH=arm GOARM=6  go build -trimpath -ldflags="-s -w" -o dist/utcar-armv6 .
+          cp /etc/ssl/certs/ca-certificates.crt dist/
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

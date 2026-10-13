@@ -254,13 +254,23 @@ A second signal during the shutdown stops _utcar_ immediately.
 
 ## Running in a container
 
-You can also run utcar in a container:
+A ready-made image is published on the GitHub Container Registry for
+`linux/amd64`, `linux/arm64` and `linux/arm/v7`, `linux/arm/v6` (Raspberry Pi);
+Docker picks the right one automatically:
 
-	docker run -p 10000:10000 tdeckers/utcar --port=10000 --addr=https://localhost:8443
+	docker pull ghcr.io/enindza/utcar:latest
+
+Tags: `latest` (the `master` branch), `<version>` for a release tag `v<version>`
+and `<branch>` for any other branch (`/` replaced by `-`). The image is built by
+[`.github/workflows/docker.yml`](.github/workflows/docker.yml) on every push.
+
+Run it:
+
+	docker run -p 10000:10000 ghcr.io/enindza/utcar --port=10000 --addr=https://localhost:8443
 
 Or alternatively:
 
-	docker run -p 12300:12300 -e UTCAR_ADDR=https://localhost:8443 tdeckers/utcar
+	docker run -p 12300:12300 -e UTCAR_ADDR=https://localhost:8443 ghcr.io/enindza/utcar
 
 With a database and two monitoring centers (the database is kept in the
 `utcar-data` volume, mounted on `/data`):
@@ -268,7 +278,7 @@ With a database and two monitoring centers (the database is kept in the
 	docker run -d --name utcar -p 12300:12300 -v utcar-data:/data \
 	    -e UTCAR_DB=/data/utcar.db \
 	    -e UTCAR_FORWARD=10.0.0.1:5000,10.0.0.2:5001 \
-	    utcar
+	    ghcr.io/enindza/utcar
 
 Or with a host directory: `-v /var/lib/utcar:/data`.
 
