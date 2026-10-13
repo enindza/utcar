@@ -9,3 +9,5 @@ utcar
 utcar_linux_amd64
 utcar_linux_arm6
 utcar.exe
+# multi-platform binaries built by .github/workflows/docker.yml
+dist

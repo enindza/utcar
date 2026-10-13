@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"testing"
-	"bytes"
 )
 
 func TestScramble(t *testing.T) {
@@ -24,7 +24,7 @@ func TestScramble(t *testing.T) {
 		t.Fatal(err)
 	}
 	output = Scramble(Scramble(input))
-	if ! bytes.Equal(input, output) {
+	if !bytes.Equal(input, output) {
 		t.Error("Input and output for Scramble-Scramble are not equal")
 	}
 }

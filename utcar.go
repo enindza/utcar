@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"expvar"
 	"fmt"
 	"io"
@@ -11,6 +12,10 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -56,11 +61,23 @@ func Execute() {
 	rootCmd.PersistentFlags().String("pwd", "", "Target password")
 	rootCmd.PersistentFlags().Int("port", 12300, "Listen port number")
 	rootCmd.PersistentFlags().Int("debug", 0, "Debug server port number (default: no debug server)")
+	rootCmd.PersistentFlags().String("db", "", "SQLite database file (default: no database)")
+	rootCmd.PersistentFlags().Bool("db-heartbeats", false, "Store heartbeat messages in the database")
+	rootCmd.PersistentFlags().StringSlice("forward", nil, "Monitoring center to forward messages to: host:port, tcp://host:port or tcp://host:port?format=raw (repeatable or comma separated)")
+	rootCmd.PersistentFlags().Duration("forward-timeout", DefaultForwardTimeout, "Monitoring center connect and response timeout")
+	rootCmd.PersistentFlags().Int("forward-queue", DefaultForwardQueue, "Messages waiting to be forwarded, per monitoring center")
+	rootCmd.PersistentFlags().Bool("forward-heartbeats", true, "Forward heartbeats as DC-09 NULL (link test) messages")
 	viper.BindPFlag("addr", rootCmd.PersistentFlags().Lookup("addr"))
 	viper.BindPFlag("user", rootCmd.PersistentFlags().Lookup("user"))
 	viper.BindPFlag("pwd", rootCmd.PersistentFlags().Lookup("pwd"))
 	viper.BindPFlag("port", rootCmd.PersistentFlags().Lookup("port"))
 	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
+	viper.BindPFlag("db", rootCmd.PersistentFlags().Lookup("db"))
+	viper.BindPFlag("db-heartbeats", rootCmd.PersistentFlags().Lookup("db-heartbeats"))
+	viper.BindPFlag("forward", rootCmd.PersistentFlags().Lookup("forward"))
+	viper.BindPFlag("forward-timeout", rootCmd.PersistentFlags().Lookup("forward-timeout"))
+	viper.BindPFlag("forward-queue", rootCmd.PersistentFlags().Lookup("forward-queue"))
+	viper.BindPFlag("forward-heartbeats", rootCmd.PersistentFlags().Lookup("forward-heartbeats"))
 
 	cobra.OnInitialize(initConfig)
 
@@ -72,15 +89,47 @@ func Execute() {
 
 func initConfig() {
 	viper.SetEnvPrefix("utcar") // uppercased automatically
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
 	viper.SetDefault("port", 12300)
+}
+
+// forwardSpecs returns the monitoring center addresses given by the
+// --forward values. A value may hold several addresses separated by commas:
+// viper doesn't split UTCAR_FORWARD.
+func forwardSpecs(values []string) []string {
+	var specs []string
+	for _, v := range values {
+		for _, spec := range strings.Split(v, ",") {
+			if spec = strings.TrimSpace(spec); spec != "" {
+				specs = append(specs, spec)
+			}
+		}
+	}
+	return specs
+}
+
+// newForwarders creates a (not started) forwarder for every spec.
+func newForwarders(specs []string, opts ForwarderOptions) ([]*Forwarder, error) {
+	var forwarders []*Forwarder
+	for _, spec := range specs {
+		f, err := NewForwarder(spec, opts)
+		if err != nil {
+			for _, f := range forwarders {
+				f.Stop()
+			}
+			return nil, err
+		}
+		forwarders = append(forwarders, f)
+	}
+	return forwarders, nil
 }
 
 // handleConnection handles connections from the alarm system.
 // In short, it accepts a connection and sends a new, encrypted key.  Then it
 // receives an encrypted message from the alarm system, after which it completes
 // with an ACK message.
-func handleConnection(c net.Conn, q chan SIA) {
+func handleConnection(c net.Conn, p *Processor) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Message processing panic (%v)\n", r)
@@ -102,6 +151,7 @@ func handleConnection(c net.Conn, q chan SIA) {
 			log.Panic("Read error: ", err)
 		}
 	}
+	received := time.Now()
 	encryptedData := buf[:n]
 
 	data := Decrypt3DESECB(encryptedData, key)
@@ -117,38 +167,72 @@ func handleConnection(c net.Conn, q chan SIA) {
 		log.Panic(err)
 	}
 
-	if IsHeartbeat(data) {
-		log.Println("Heartbeat.")
-		return // don't know what to do with this yet.
+	m := ParseMessage(data)
+	m.Time = received
+	if addr := c.RemoteAddr(); addr != nil {
+		m.Remote = addr.String()
 	}
-	parsed, err := ParseSIA(data)
-	if err != nil {
-		log.Panicf("Not a recognized message: %s", string(data[:]))
-	}
-	sia := SIA{time.Now(), parsed[0], parsed[1], parsed[2], parsed[3], parsed[4], parsed[5]}
-	log.Println(sia)
-
-	requests.Add(1) // accessible through expvar
-
-	if q == nil {
-		return
-	} else {
-		q <- sia
-	}
+	p.Process(m)
 }
 
-func receiveSignal() {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
+// shutdownTimeout is how long serve waits for open connections after a
+// shutdown signal (docker stop sends SIGKILL after 10s by default).
+var shutdownTimeout = 5 * time.Second
+
+// serve accepts connections from the alarm system until ctx is done. Then it
+// stops accepting and waits (at most shutdownTimeout) for open connections.
+func serve(ctx context.Context, l net.Listener, p *Processor) {
+	var stopping atomic.Bool
 	go func() {
-		<-sig
-		os.Exit(0)
+		<-ctx.Done()
+		log.Println("Shutting down...")
+		stopping.Store(true)
+		l.Close() // unblocks Accept
 	}()
+
+	var wg sync.WaitGroup
+	for { // until shutdown...
+		// Wait for a connection
+		conn, err := l.Accept()
+		if err != nil {
+			if stopping.Load() {
+				break
+			}
+			log.Fatal(err)
+		}
+		// Handle the connection in a new routine
+		// The loop then returns to accepting, so that
+		// multiple connections may be served concurrently.
+		wg.Add(1)
+		go func(c net.Conn) {
+			defer wg.Done()
+			defer c.Close()
+
+			handleConnection(c, p)
+		}(conn)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		log.Printf("Shutdown: open connections didn't finish within %v\n", shutdownTimeout)
+	}
 }
 
 func run() {
-	// setup response to CTRL-C
-	receiveSignal()
+	// setup response to CTRL-C and docker stop (SIGTERM): shut down cleanly
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer log.Println("Stopped.") // deferred first: runs after all cleanup
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop() // a second signal kills immediately
+	}()
 	// Listen on TCP port 12300 on all interfaces
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", viper.GetInt("port")))
 	if err != nil {
@@ -185,21 +269,45 @@ func run() {
 		}()
 	}
 
-	for { // eternally...
-		// Wait for a connection
-		conn, err := l.Accept()
+	// open database (if db is provided)
+	var store *Store
+	if path := viper.GetString("db"); path != "" {
+		// own err: the debug server goroutine may still assign the outer one
+		s, err := OpenStore(path)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("Failed to open database %s (%v)", path, err)
 		}
-		// Handle the connection in a new routine
-		// The loop then returns to accepting, so that
-		// multiple connections may be served concurrently.
-		go func(c net.Conn) {
-			defer c.Close()
-
-			handleConnection(c, pchan)
-		}(conn)
+		defer s.Close()
+		store = s
+		log.Printf("Storing messages in %s (heartbeats: %t)\n", path, viper.GetBool("db-heartbeats"))
 	}
+
+	// setup forwarding to monitoring centers (if forward is provided)
+	opts := ForwarderOptions{
+		QueueSize: viper.GetInt("forward-queue"),
+		Timeout:   viper.GetDuration("forward-timeout"),
+	}
+	// own err: the debug server goroutine may still assign the outer one
+	forwarders, ferr := newForwarders(forwardSpecs(viper.GetStringSlice("forward")), opts)
+	if ferr != nil {
+		log.Fatalf("Failed to setup forwarding (%v)", ferr)
+	}
+	for _, f := range forwarders {
+		f.Start()
+		defer f.Stop()
+		log.Printf("Forwarding to %s (format %s, heartbeats: %t)\n", f.Name(), f.Format(), viper.GetBool("forward-heartbeats"))
+	}
+
+	p := &Processor{
+		Store:             store,
+		Forwarders:        forwarders,
+		Push:              pchan,
+		StoreHeartbeats:   viper.GetBool("db-heartbeats"),
+		ForwardHeartbeats: viper.GetBool("forward-heartbeats"),
+	}
+
+	serve(ctx, l, p)
+	// deferred calls stop the forwarders and close the database
 }
 
 func main() {
