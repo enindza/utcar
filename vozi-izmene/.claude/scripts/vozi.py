@@ -225,6 +225,8 @@ def nezavisna_provera(plan: Path, nn: str, od_commita: str) -> tuple[str, list[s
         if greska := pokreni(komanda):
             return greska, []
 
+    if sekcija(text, "Testovi").strip() and not testovi_koraka(text):
+        return None  # korak izricito nema novih testova (npr. integraciona provera): kod ne mora da se menja
     kod = [f for f in fajlovi_za_menjanje(text) if not f.endswith(".md")]
     promenjeni = git("diff", "--name-only", f"{od_commita}..HEAD").splitlines()
     if kod and not any(p == f or p.startswith(f.rstrip("/") + "/") for f in kod for p in promenjeni):
