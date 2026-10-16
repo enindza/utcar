@@ -124,7 +124,15 @@ Ti: `/clear`, `/korak`, i tako do kraja. Svaki korak počinje sa čistim konteks
 ```
 python .claude/scripts/vozi.py
 ```
-Skripta sama pokreće `claude -p "/korak NN"` za svaki korak. Svaki poziv je nov proces, dakle čist kontekst, isto kao `/clear`. Posle svakog GOTOVO koraka skripta, bez modela, proverava dokaz umesto izveštaja: pokrene komande iz sekcije "Provera" tog koraka i `pytest -q`, i proveri da commit-ovi koraka menjaju bar jedan fajl koda iz "Gde / Menjaj". Ako nešto ne prođe, vrati korak na BLOKIRAN sa razlogom na kraju izveštaja. Zato komanda u "Provera" mora da padne kad posao nije urađen: `pytest ... -k delete` pada ako testova nema, a goli `pytest -q` prolazi. Posle koraka GOTOVO-DRUGAČIJE ili BLOKIRAN sama pokrene `/provera` pa nastavlja. Staje kad je plan gotov, kad je korak BLOKIRAN i posle `/provera`, kad korak nije commit-ovan ili kad radni direktorijum nije čist. Opcije: `--max-koraka N` (stani posle N koraka), `--budzet 2` (najviše 2 USD po pozivu), `--suvo` (samo kaži šta bi pokrenuo). Ctrl+C prekida, a ista komanda nastavlja od mesta gde je stala. Izmene fajlova se prihvataju same (`--permission-mode acceptEdits`); komande van liste u `.claude/settings.json` se odbijaju, ne pitaju, pa ako korak zapne na tome, dodaj komandu u `allow`.
+Skripta sama pokreće `claude -p "/korak NN"` za svaki korak. Svaki poziv je nov proces, dakle čist kontekst, isto kao `/clear`. Posle svakog GOTOVO koraka skripta, bez modela, proverava dokaz umesto izveštaja:
+- da je korak napisao testove iz sekcije "Testovi", pod tim imenima;
+- da nijedan test (ni fixture) koji je postojao pre koraka nije promenjen, obrisan ni preskočen (`skip`, `xfail`), osim onih iz reda `Menja testove:`;
+- da prolaze komande iz "Provera" i ceo `pytest -q`;
+- da commit-ovi koraka menjaju bar jedan fajl koda iz "Gde / Menjaj".
+
+Ako nešto ne prođe, vrati korak na BLOKIRAN sa razlogom na kraju izveštaja (diran test fajl vrati na stanje pre koraka). Ovako testovi postaju specifikacija: ono što je jednom dogovoreno i pokriveno testom ne može tiho da se promeni, nego samo kroz plan. Zato `/plan` (jači model) određuje testove, a `/korak` ih piše pre koda, i zato komanda u "Provera" mora da padne kad posao nije urađen: `pytest ... -k ime_testa` pada ako testa nema, a goli `pytest -q` prolazi.
+
+Posle koraka GOTOVO-DRUGAČIJE ili BLOKIRAN sama pokrene `/provera` pa nastavlja. Staje kad je plan gotov, kad je korak BLOKIRAN i posle `/provera`, kad korak nije commit-ovan ili kad radni direktorijum nije čist. Opcije: `--max-koraka N` (stani posle N koraka), `--budzet 2` (najviše 2 USD po pozivu), `--suvo` (samo kaži šta bi pokrenuo). Ctrl+C prekida, a ista komanda nastavlja od mesta gde je stala. Izmene fajlova se prihvataju same (`--permission-mode acceptEdits`); komande van liste u `.claude/settings.json` se odbijaju, ne pitaju, pa ako korak zapne na tome, dodaj komandu u `allow`.
 
 **Kad korak ne prođe:** Claude postavi `Status: BLOKIRAN` i opiše problem u sekciji "Otvoreno". Ti onda ili prepraviš fajl koraka rukom, ili se vratiš na jači model: `/model opus`, `/clear`, pa "korak 03 je blokiran, pročitaj docs/plans/001-auth/steps/03-*.md i reši".
 

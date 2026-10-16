@@ -33,7 +33,9 @@ Ti si arhitekta. Praviš plan koji će izvršiti drugi model, korak po korak, u 
 - "Kako" konkretno: nazivi funkcija, potpisi, ponašanje na greške. Skica koda gde je dvosmisleno, ili upućivanje na proto.
 - Kod koji već postoji (proto, stariji modul, uzorak iz drugog projekta) prosledi u korak: putanju ili ceo isečak, uz napomenu odakle je i da li je proveren. Ne prepričavaj ga; izvršilac ga bez izvora ne može otkriti.
 - Kod kog još nema ne piši umesto izvršioca.
-- "Provera" je komanda koja se pokreće i očekivan ishod. Bez provere korak ne postoji. Komanda mora da padne kad posao nije urađen: imenuj nove testove (`pytest putanja -q -k ime_testa`), ne goli `pytest -q` (osim u završnom integracionom koraku), jer `vozi.py` po njoj proverava korak bez čitanja izveštaja.
+- "Testovi": ti odlučuješ šta se proverava, ne izvršilac. Za svaki korak koji menja kod navedi nove testove po imenu i šta svaki tvrdi (ulaz → očekivani ishod), uključujući bar jedan slučaj greške. Ponašanje opiši tako da test ne može da prođe a da posao ne bude urađen.
+- "Provera" je komanda koja se pokreće i očekivan ishod. Bez provere korak ne postoji. Komanda pokreće testove iz "Testovi" po imenu (`pytest putanja -q -k "ime_a or ime_b"`), ne goli `pytest -q` (osim u završnom integracionom koraku), jer `vozi.py` po njoj proverava korak bez čitanja izveštaja.
+- Postojeći testovi su ugovor: korak ne sme da ih menja ni briše. Ako plan namerno menja ponašanje koje neki test čuva, navedi taj test u redu `- Menja testove:` pod "Gde". `vozi.py` obara korak koji dira test koji tu nije naveden.
 - Prvi korak koji pravi novi modul: uključi i pisanje njegovog `CLAUDE.md` (po `app/modules/_sablon/CLAUDE.md`).
 - Svaki korak koji menja interfejs između modula: uključi ažuriranje `docs/ARHITEKTURA.md` u tom koraku.
 - Poslednji korak: integraciona provera (`pytest -q`) i čišćenje.
